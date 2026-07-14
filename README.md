@@ -3,11 +3,7 @@
 **The worm meets bare metal.**
 
 <p align="center">
-  <video src="https://github.com/BerkeOruc/biosaka/raw/master/biosaka.mp4" controls poster="screenshot.png" width="640">
-    <a href="https://github.com/BerkeOruc/biosaka/raw/master/biosaka.mp4">
-      <img src="screenshot.png" alt="BioSaka demo video" width="640" style="border-radius: 8px;">
-    </a>
-  </video>
+  <img src="demo.gif" alt="BioSaka demo" width="480">
   <br>
   <em>307 neurons, ~2800 synapses. all running in your terminal.</em>
 </p>
