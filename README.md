@@ -2,7 +2,9 @@
 
 **The worm meets bare metal.**
 
-Real C. elegans connectome. 307 neurons. ~2800 synapses. All running in your terminal.
+<video src="biosaka.mp4" controls width="100%"></video>
+
+*307 neurons, ~2800 synapses, all running in your terminal.*
 
 ## what
 
@@ -55,13 +57,13 @@ works on linux, macos, windows. needs a terminal that likes crossterm.
 
 ```
                          ┌──────────────────────┐
-  data/connectome.csv ──>│      build.rs         │──> static edge list
-    (White 1986)         │  (compile time)        │    (307 neurons)
+  data/connectome.csv ──>│      build.rs        │──> static edge list
+    (White 1986)         │  (compile time)      │    (307 neurons)
                          └──────────────────────┘
                                     │
                          ┌─────────▼──────────┐
-                         │  LIF neural engine  │
-                         │  (simulation loop)  │
+                         │  LIF neural engine │
+                         │  (simulation loop) │
                          └─────────┬──────────┘
                                     │
                     ┌───────────────┼───────────────┐
@@ -88,7 +90,14 @@ the worm body is 20 segments. motor neurons (VB, DB, VA, DA) drive a sinusoidal 
 
 ## license
 
-MIT. do what you want.
+**BioSaka Research License** — All rights reserved.
+
+This project is a learning and research project. You may use,
+modify, and study the code for **non-commercial research and
+educational purposes only**. Commercial use, redistribution,
+and incorporation into commercial products are prohibited.
+
+See [LICENSE](LICENSE) for full terms.
 
 ---
 
