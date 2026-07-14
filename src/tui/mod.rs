@@ -158,7 +158,7 @@ const TECH_DOC: &[&str] = &[
     " [4] Varshney et al. 2011 - PLoS Comput Biol",
     "",
     "",
-    " --- BIOsaka v0.1 ---",
+    " --- BIOsaka v0.2 ---",
     " The worm meets bare metal.",
     " Berke Oruc, 2026",
     "",
@@ -256,7 +256,7 @@ impl App {
         let s = time_secs % 60;
 
         let title = Paragraph::new(Line::from(Span::styled(
-            " BioSaka v0.1 - C. elegans ",
+            " BioSaka v0.2 - C. elegans ",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )))
         .block(Block::default().borders(Borders::ALL));
