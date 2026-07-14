@@ -71,11 +71,11 @@ needs a terminal that likes crossterm. if your terminal cant handle escape codes
   data/connectome.csv ──>│      build.rs        │──> static edge list
     (White 1986)         │  (compile time)      │    (307 neurons)
                          └──────────────────────┘
-                                    │
-                         ┌─────────▼──────────┐
-                         │  LIF neural engine │
-                         │  (simulation loop) │
-                         └─────────┬──────────┘
+                                   │
+                         ┌─────────▼───────────┐
+                         │  LIF neural engine  │
+                         │  (simulation loop)  │
+                         └──────────┬──────────┘
                                     │
                     ┌───────────────┼───────────────┐
                     ▼               ▼               ▼
