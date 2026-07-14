@@ -1,6 +1,6 @@
 [package]
 name = "biosaka"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "C. elegans neural simulation — 307 neurons, ~2800 synapses, LIF spiking network in your terminal"
 license = "MIT"

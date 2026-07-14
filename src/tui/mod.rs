@@ -2,7 +2,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style, Modifier};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::connectome::Connectome;
@@ -158,7 +158,7 @@ const TECH_DOC: &[&str] = &[
     " [4] Varshney et al. 2011 - PLoS Comput Biol",
     "",
     "",
-    " --- BIOsaka v0.2 ---",
+    " --- BIOsaka v0.3 ---",
     " The worm meets bare metal.",
     " Berke Oruc, 2026",
     "",
@@ -172,13 +172,34 @@ pub struct App {
     pub graph_offset_x: f32,
     pub graph_offset_y: f32,
     pub scroll_offset: usize,
-    pub connectome_edges: Vec<(u16, u16, u16)>,
+    pub show_help: bool,
+    pub connectome_edges: Vec<(u16, u16, u16, u8)>,  // (pre, post, weight, type) type=0 chem, 1 gap
+    pub use_force_layout: bool,
+    cached_positions: Vec<(u16, u16)>,
+    unit_positions: Vec<(f32, f32)>,
 }
 
 impl App {
     pub fn new(connectome: &Connectome) -> Self {
-        let mut chemical_edges = connectome.get_chemical_edges().to_vec();
-        chemical_edges.extend(connectome.get_gap_junction_edges().iter().map(|&(a, b, w)| (a, b, w)));
+        let mut edges: Vec<(u16, u16, u16, u8)> = connectome.get_chemical_edges().iter()
+            .map(|&(a, b, w)| (a, b, w, 0)).collect();
+        edges.extend(connectome.get_gap_junction_edges().iter().map(|&(a, b, w)| (a, b, w, 1)));
+
+        // Precompute peanut unit positions (without aspect, applied per-frame)
+        let n = connectome.num_neurons() as usize;
+        let unit_positions: Vec<(f32, f32)> = (0..n)
+            .map(|i| {
+                let t = i as f32 / n.max(1) as f32;
+                let angle = t * 6.2832;
+                let lobe = (angle * 2.0).cos();
+                let organic = (angle * 3.0 + 1.0).sin() * 0.015;
+                let r = 0.36 + lobe * 0.06 + organic;
+                let x = 0.5 + angle.cos() * r * 1.08;
+                let y = 0.5 + angle.sin() * r * 0.95;
+                (x, y)
+            })
+            .collect();
+
         App {
             running: true,
             paused: false,
@@ -187,8 +208,74 @@ impl App {
             graph_offset_x: 0.0,
             graph_offset_y: 0.0,
             scroll_offset: 0,
-            connectome_edges: chemical_edges,
+            show_help: false,
+            connectome_edges: edges,
+            use_force_layout: false,
+            cached_positions: Vec::new(),
+            unit_positions,
         }
+    }
+
+    /// Compute Fruchterman-Reingold force-directed layout.
+    /// Replaces unit_positions with force-directed positions to reveal functional clusters.
+    fn compute_force_layout(&mut self, n: usize) {
+        if n == 0 { return; }
+        // Simple deterministic LCG (no rand dependency)
+        let mut rng_state: u64 = 42;
+        let mut rand_f32 = || {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((rng_state >> 33) as f32) / (1u64 << 31) as f32
+        };
+        // Initial positions spread across unit square
+        let mut pos: Vec<(f32, f32)> = (0..n)
+            .map(|_| (0.15 + rand_f32() * 0.7, 0.15 + rand_f32() * 0.7))
+            .collect();
+        let area = 0.7 * 0.7;
+        let k = (area / n as f32).sqrt();
+        let mut temp = 0.5;
+        // Fruchterman-Reingold main loop
+        for _ in 0..80 {
+            let mut disp = vec![(0.0f32, 0.0f32); n];
+            // Repulsive: all pairs
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let dx = pos[j].0 - pos[i].0;
+                    let dy = pos[j].1 - pos[i].1;
+                    let d = (dx * dx + dy * dy).sqrt().max(0.001);
+                    let f = k * k / d;
+                    let fx = f * dx / d;
+                    let fy = f * dy / d;
+                    disp[i].0 -= fx; disp[i].1 -= fy;
+                    disp[j].0 += fx; disp[j].1 += fy;
+                }
+            }
+            // Attractive: along edges
+            for &(pre, post, _, _) in &self.connectome_edges {
+                let i = pre as usize;
+                let j = post as usize;
+                if i >= n || j >= n { continue; }
+                let dx = pos[j].0 - pos[i].0;
+                let dy = pos[j].1 - pos[i].1;
+                let d = (dx * dx + dy * dy).sqrt().max(0.001);
+                let f = d * d / (k * 4.0);
+                let fx = f * dx / d;
+                let fy = f * dy / d;
+                disp[i].0 += fx; disp[i].1 += fy;
+                disp[j].0 -= fx; disp[j].1 -= fy;
+            }
+            // Apply displacement with temperature cooling
+            for i in 0..n {
+                let len = (disp[i].0 * disp[i].0 + disp[i].1 * disp[i].1).sqrt().max(0.0001);
+                let scale = if len > temp { temp / len } else { 1.0 };
+                pos[i].0 = (pos[i].0 + disp[i].0 * scale).clamp(0.0, 1.0);
+                pos[i].1 = (pos[i].1 + disp[i].1 * scale).clamp(0.0, 1.0);
+            }
+            temp *= 0.95;
+            if temp < 0.005 { break; }
+        }
+        self.unit_positions = pos;
+        self.use_force_layout = true;
+        self.cached_positions.clear();
     }
 
     pub fn handle_input(&mut self) -> std::io::Result<()> {
@@ -202,15 +289,20 @@ impl App {
                     KeyCode::Char(' ') => { self.paused = !self.paused; }
                     KeyCode::Char('+') | KeyCode::Char('=') => {
                         self.zoom_level = (self.zoom_level * 1.2).min(5.0);
+                        self.cached_positions.clear();
                     }
-                    KeyCode::Char('-') => { self.zoom_level = (self.zoom_level / 1.2).max(0.2); }
-                    KeyCode::Left => { self.graph_offset_x -= 5.0 / self.zoom_level; }
-                    KeyCode::Right => { self.graph_offset_x += 5.0 / self.zoom_level; }
+                    KeyCode::Char('-') => { self.zoom_level = (self.zoom_level / 1.2).max(0.2);
+                        self.cached_positions.clear(); }
+                    KeyCode::Left => { self.graph_offset_x -= 5.0 / self.zoom_level;
+                        self.cached_positions.clear(); }
+                    KeyCode::Right => { self.graph_offset_x += 5.0 / self.zoom_level;
+                        self.cached_positions.clear(); }
                     KeyCode::Up => {
                         if self.selected_tab == 4 {
                             self.scroll_offset = self.scroll_offset.saturating_sub(1);
                         } else {
                             self.graph_offset_y -= 5.0 / self.zoom_level;
+                            self.cached_positions.clear();
                         }
                     }
                     KeyCode::Down => {
@@ -219,6 +311,7 @@ impl App {
                             self.scroll_offset = self.scroll_offset.saturating_add(1).min(max);
                         } else {
                             self.graph_offset_y += 5.0 / self.zoom_level;
+                            self.cached_positions.clear();
                         }
                     }
                     KeyCode::Tab => { self.selected_tab = (self.selected_tab + 1) % 5; self.scroll_offset = 0; }
@@ -227,6 +320,27 @@ impl App {
                     KeyCode::Char('3') => { self.selected_tab = 2; self.scroll_offset = 0; }
                     KeyCode::Char('c') | KeyCode::Char('C') => { self.selected_tab = 3; self.scroll_offset = 0; }
                     KeyCode::Char('i') | KeyCode::Char('I') => { self.selected_tab = 4; self.scroll_offset = 0; }
+                    KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('?') => { self.show_help = !self.show_help; }
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        if self.use_force_layout {
+                            // Reset to peanut: re-compute original unit positions
+                            self.use_force_layout = false;
+                            let n = 307;
+                            self.unit_positions = (0..n)
+                                .map(|i| {
+                                    let t = i as f32 / n.max(1) as f32;
+                                    let angle = t * 6.2832;
+                                    let lobe = (angle * 2.0).cos();
+                                    let organic = (angle * 3.0 + 1.0).sin() * 0.015;
+                                    let r = 0.36 + lobe * 0.06 + organic;
+                                    (0.5 + angle.cos() * r * 1.08, 0.5 + angle.sin() * r * 0.95)
+                                })
+                                .collect();
+                            self.cached_positions.clear();
+                        } else {
+                            self.compute_force_layout(307);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -234,7 +348,7 @@ impl App {
         Ok(())
     }
 
-    pub fn draw(&self, frame: &mut Frame, sim: &Simulation, worm: &Worm) {
+    pub fn draw(&mut self, frame: &mut Frame, sim: &Simulation, worm: &Worm) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
@@ -242,6 +356,9 @@ impl App {
         self.draw_header(frame, chunks[0], sim);
         self.draw_main(frame, chunks[1], sim, worm);
         self.draw_footer(frame, chunks[2]);
+        if self.show_help {
+            self.draw_help_overlay(frame, frame.area());
+        }
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect, sim: &Simulation) {
@@ -256,7 +373,7 @@ impl App {
         let s = time_secs % 60;
 
         let title = Paragraph::new(Line::from(Span::styled(
-            " BioSaka v0.2 - C. elegans ",
+            " BioSaka v0.3 - C. elegans ",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )))
         .block(Block::default().borders(Borders::ALL));
@@ -289,7 +406,7 @@ impl App {
         frame.render_widget(ctrl, chunks[2]);
     }
 
-    fn draw_main(&self, frame: &mut Frame, area: Rect, sim: &Simulation, worm: &Worm) {
+    fn draw_main(&mut self, frame: &mut Frame, area: Rect, sim: &Simulation, worm: &Worm) {
         match self.selected_tab {
             0 => self.draw_graph(frame, area, sim),
             1 => self.draw_worm(frame, area, worm, sim),
@@ -300,11 +417,12 @@ impl App {
         }
     }
 
-    fn draw_graph(&self, frame: &mut Frame, area: Rect, sim: &Simulation) {
+    fn draw_graph(&mut self, frame: &mut Frame, area: Rect, sim: &Simulation) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Neural Network ({:.1}x) | {} neurons | {} edges ",
-                self.zoom_level, 307usize, self.connectome_edges.len()));
+            .title(format!(" Neural Network ({:.1}x) | 307n {}e{}",
+                self.zoom_level, self.connectome_edges.len(),
+                if self.use_force_layout { " force" } else { "" }));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let buf = frame.buffer_mut();
@@ -313,33 +431,44 @@ impl App {
         let n = sim.neurons.len();
         let aspect = ch / cw;
 
-        let positions: Vec<(u16, u16)> = (0..n)
-            .map(|i| {
-                let t = i as f32 / n.max(1) as f32;
-                let angle = t * 6.2832;
-                // Two-hemisphere brain shape using peanut/lobe parameterization
-                // cos(2θ) bulges at sides (0°/180°) and pinches at top/bottom (90°/270°)
-                let lobe = (angle * 2.0).cos();
-                let organic = (angle * 3.0 + 1.0).sin() * 0.015;
-                let r = 0.36 + lobe * 0.06 + organic;
-                let sx = 1.08;
-                let sy = 0.95;
-                let x = 0.5 + angle.cos() * r * sx;
-                let y = 0.5 + angle.sin() * r * sy * aspect;
-                let xa = (x + self.graph_offset_x * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
-                let ya = (y + self.graph_offset_y * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
-                let px = (xa * cw) as u16 + inner.x;
-                let py = (ya * ch) as u16 + inner.y;
-                (px, py)
-            })
-            .collect();
+        let positions: Vec<(u16, u16)> = if self.cached_positions.len() == n {
+            // Cached — just re-center (avoids trig & zoom/pan recompute)
+            self.cached_positions.clone()
+        } else {
+            if self.use_force_layout && self.unit_positions.len() == n {
+                // Force-directed layout: use precomputed unit positions
+                (0..n).map(|i| {
+                    let (ux, uy) = self.unit_positions[i];
+                    let uy_adj = 0.5 + (uy - 0.5) * aspect;
+                    let xa = (ux + self.graph_offset_x * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
+                    let ya = (uy_adj + self.graph_offset_y * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
+                    let px = (xa * cw) as u16 + inner.x;
+                    let py = (ya * ch) as u16 + inner.y;
+                    (px, py)
+                }).collect()
+            } else {
+                // Peanut layout: compute from unit_positions with aspect
+                (0..n).map(|i| {
+                    let (ux, uy) = self.unit_positions[i];
+                    let y_with_aspect = 0.5 + (uy - 0.5) * aspect;
+                    let xa = (ux + self.graph_offset_x * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
+                    let ya = (y_with_aspect + self.graph_offset_y * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
+                    let px = (xa * cw) as u16 + inner.x;
+                    let py = (ya * ch) as u16 + inner.y;
+                    (px, py)
+                }).collect()
+            }
+        };
+        // Cache for next frame
+        self.cached_positions = positions.clone();
 
         let step = (self.connectome_edges.len() / 1500).max(1);
         for idx in (0..self.connectome_edges.len()).step_by(step) {
-            let (pre, post, _) = self.connectome_edges[idx];
+            let (pre, post, _, etype) = self.connectome_edges[idx];
             if let (Some(&(x1, y1)), Some(&(x2, y2))) = (positions.get(pre as usize), positions.get(post as usize)) {
                 let mid_active = sim.neurons[pre as usize].firing as u8 + sim.neurons[post as usize].firing as u8;
-                let c = if mid_active > 0 { Color::Gray } else { Color::DarkGray };
+                let base = if etype == 1 { Color::Gray } else { Color::DarkGray };
+                let c = if mid_active > 0 { Color::White } else { base };
                 draw_line(buf, x1, y1, x2, y2, c);
             }
         }
@@ -366,6 +495,27 @@ impl App {
                     buf[(px, py)].set_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
                 } else {
                     buf[(px, py)].set_fg(color);
+                }
+            }
+        }
+
+        // Label top active neurons
+        let mut active: Vec<(usize, f32)> = (0..positions.len())
+            .map(|i| (i, sim.neurons[i].firing_rate)).collect();
+        active.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        for &(i, rate) in active.iter().take(8) {
+            if rate < 0.02 { break; }
+            let (px, py) = positions[i];
+            if py >= inner.y + 1 && py < inner.y + inner.height - 1 {
+                let name = sim.connectome.neuron_name(i as u16);
+                let x0 = px + 2;
+                let name_len = name.len() as u16;
+                if x0 + name_len < inner.x + inner.width {
+                    for (ci, c) in name.chars().enumerate() {
+                        let cell = &mut buf[(x0 + ci as u16, py)];
+                        cell.set_char(c);
+                        cell.set_fg(Color::DarkGray);
+                    }
                 }
             }
         }
@@ -648,6 +798,7 @@ impl App {
             " [3]Stats ",
             " [C]redit ",
             " [I]nfo ",
+            " [H]elp ",
         ];
         let spans: Vec<Span> = tabs.iter().enumerate().map(|(i, name)| {
             if i == self.selected_tab {
@@ -657,6 +808,40 @@ impl App {
             }
         }).collect();
         frame.render_widget(Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL)), area);
+    }
+
+    fn draw_help_overlay(&self, frame: &mut Frame, area: Rect) {
+        let help_w = 44.min(area.width.saturating_sub(4));
+        let help_h = 20.min(area.height.saturating_sub(4));
+        let x = (area.width - help_w) / 2;
+        let y = (area.height - help_h) / 2;
+        let overlay = Rect { x, y, width: help_w, height: help_h };
+        frame.render_widget(Clear, overlay);
+        let help_data: [(&str, Color, bool); 14] = [
+            (" Controls ", Color::Cyan, true),
+            ("", Color::White, false),
+            (" [1] [2] [3]  switch tabs", Color::White, false),
+            (" [c]          credits tab", Color::White, false),
+            (" [i]          info tab", Color::White, false),
+            (" [h] [?]      this help", Color::White, false),
+            (" [Space]      pause/resume", Color::White, false),
+            (" [+]/[-]      zoom in/out", Color::White, false),
+            (" [Arrows]     pan (graph) / scroll (info)", Color::White, false),
+            (" [f]          toggle force layout", Color::White, false),
+            (" [q]          quit", Color::White, false),
+            ("", Color::White, false),
+            (" 307 neurons | 2847 edges", Color::DarkGray, false),
+            (" C. elegans hermaphrodite", Color::DarkGray, false),
+        ];
+        let lines: Vec<Line> = help_data.iter().map(|(text, color, bold)| {
+            let mut style = Style::default().fg(*color);
+            if *bold { style = style.add_modifier(Modifier::BOLD); }
+            Line::from(Span::styled(*text, style))
+        }).collect();
+        let para = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Help "))
+            .style(Style::default().fg(Color::White).bg(Color::Black));
+        frame.render_widget(para, overlay);
     }
 }
 
