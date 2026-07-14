@@ -2,6 +2,16 @@
 name = "biosaka"
 version = "0.1.0"
 edition = "2021"
+description = "C. elegans neural simulation — 307 neurons, ~2800 synapses, LIF spiking network in your terminal"
+license = "MIT"
+repository = "https://github.com/BerkeOruc/biosaka"
+homepage = "https://github.com/BerkeOruc/biosaka"
+keywords = ["neural", "simulation", "c-elegans", "connectome", "tui"]
+categories = ["simulation", "science"]
+
+[[bin]]
+name = "biosaka"
+path = "src/main.rs"
 
 [dependencies]
 ratatui = "0.29"

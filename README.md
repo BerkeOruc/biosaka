@@ -34,6 +34,15 @@ no GUI. no bloat. just a worm in a box.
 
 ## quick start
 
+### cargo install (recommended)
+
+```bash
+cargo install biosaka
+biosaka worm
+```
+
+### from source
+
 ```bash
 git clone https://github.com/berkeoruc/biosaka
 cd biosaka

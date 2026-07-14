@@ -17,6 +17,13 @@ use worm::Worm;
 use tui::App;
 
 fn main() -> std::io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] != "worm" {
+        eprintln!("Usage: biosaka worm");
+        eprintln!("       biosaka [worm]");
+        std::process::exit(1);
+    }
+
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
