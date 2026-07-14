@@ -311,14 +311,21 @@ impl App {
         let cw = inner.width.max(1) as f32;
         let ch = inner.height.max(1) as f32;
         let n = sim.neurons.len();
+        let aspect = ch / cw;
 
         let positions: Vec<(u16, u16)> = (0..n)
             .map(|i| {
                 let t = i as f32 / n.max(1) as f32;
                 let angle = t * 6.2832;
-                let radius = 0.32 + (t * 3.0).sin() * 0.12;
-                let x = 0.5 + angle.cos() * radius;
-                let y = 0.5 + angle.sin() * radius * (ch / cw);
+                // Two-hemisphere brain shape using peanut/lobe parameterization
+                // cos(2θ) bulges at sides (0°/180°) and pinches at top/bottom (90°/270°)
+                let lobe = (angle * 2.0).cos();
+                let organic = (angle * 3.0 + 1.0).sin() * 0.015;
+                let r = 0.36 + lobe * 0.06 + organic;
+                let sx = 1.08;
+                let sy = 0.95;
+                let x = 0.5 + angle.cos() * r * sx;
+                let y = 0.5 + angle.sin() * r * sy * aspect;
                 let xa = (x + self.graph_offset_x * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
                 let ya = (y + self.graph_offset_y * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
                 let px = (xa * cw) as u16 + inner.x;
@@ -327,35 +334,52 @@ impl App {
             })
             .collect();
 
-        let step = (self.connectome_edges.len() / 2000).max(1);
+        let step = (self.connectome_edges.len() / 1500).max(1);
         for idx in (0..self.connectome_edges.len()).step_by(step) {
             let (pre, post, _) = self.connectome_edges[idx];
             if let (Some(&(x1, y1)), Some(&(x2, y2))) = (positions.get(pre as usize), positions.get(post as usize)) {
-                draw_line(buf, x1, y1, x2, y2, Color::DarkGray);
+                let mid_active = sim.neurons[pre as usize].firing as u8 + sim.neurons[post as usize].firing as u8;
+                let c = if mid_active > 0 { Color::Gray } else { Color::DarkGray };
+                draw_line(buf, x1, y1, x2, y2, c);
             }
         }
 
         for (i, &(px, py)) in positions.iter().enumerate() {
             if px >= inner.x + 1 && px < inner.x + inner.width - 1 && py >= inner.y + 1 && py < inner.y + inner.height - 1 {
-                let color = if sim.neurons[i].firing {
-                    Color::Yellow
-                } else if sim.neurons[i].firing_rate > 0.05 {
-                    Color::Green
-                } else if sim.neurons[i].firing_rate > 0.01 {
-                    Color::Cyan
+                let rate = sim.neurons[i].firing_rate;
+                let (color, bold) = if sim.neurons[i].firing {
+                    (Color::Yellow, true)
+                } else if rate > 0.08 {
+                    (Color::LightGreen, true)
+                } else if rate > 0.04 {
+                    (Color::Green, false)
+                } else if rate > 0.015 {
+                    (Color::Cyan, false)
+                } else if rate > 0.005 {
+                    (Color::Blue, false)
                 } else {
-                    Color::DarkGray
+                    (Color::DarkGray, false)
                 };
-                buf[(px, py)].set_char('\u{25CF}');
-                buf[(px, py)].set_fg(color);
+                let dot = if sim.neurons[i].firing { '\u{25C9}' } else { '\u{25CF}' };
+                buf[(px, py)].set_char(dot);
+                if bold {
+                    buf[(px, py)].set_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
+                } else {
+                    buf[(px, py)].set_fg(color);
+                }
             }
         }
     }
 
     fn draw_worm(&self, frame: &mut Frame, area: Rect, worm: &Worm, sim: &Simulation) {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(26)])
+            .split(area);
+
         let block = Block::default().borders(Borders::ALL).title(" Worm Body ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = block.inner(chunks[0]);
+        frame.render_widget(block, chunks[0]);
         let buf = frame.buffer_mut();
         let cw = inner.width.max(1) as f32;
         let ch = inner.height.max(1) as f32;
@@ -366,8 +390,18 @@ impl App {
             let px = ((seg.x - cx + 0.5) * cw * 0.8 + cw * 0.1) as u16 + inner.x;
             let py = ((seg.y - cy + 0.5) * ch * 0.8 + ch * 0.1) as u16 + inner.y;
             if px < inner.x + inner.width && py < inner.y + inner.height && px > inner.x && py > inner.y {
-                let ch = if i == 0 { '@' } else { 'o' };
-                let color = if i < 4 { Color::LightRed } else { Color::White };
+                let frac = i as f32 / worm.segments.len().max(1) as f32;
+                let (ch, color) = if i == 0 {
+                    ('\u{2588}', Color::LightRed)
+                } else if frac < 0.15 {
+                    ('\u{25CF}', Color::Red)
+                } else if frac < 0.40 {
+                    ('\u{25CF}', Color::LightRed)
+                } else if frac < 0.70 {
+                    ('\u{25D0}', Color::White)
+                } else {
+                    ('\u{25D1}', Color::DarkGray)
+                };
                 buf[(px, py)].set_char(ch);
                 buf[(px, py)].set_fg(color);
             }
@@ -375,23 +409,44 @@ impl App {
 
         let mut lm = 0.0f32;
         let mut rm = 0.0f32;
+        let mut lc = 0u32;
+        let mut rc = 0u32;
         for n in &sim.neurons {
             if n.name.starts_with("VB") || n.name.starts_with("DB") {
-                if n.name.ends_with('L') { lm += n.firing_rate; } else { rm += n.firing_rate; }
+                if n.name.ends_with('L') { lm += n.firing_rate; lc += 1; }
+                if n.name.ends_with('R') { rm += n.firing_rate; rc += 1; }
             }
         }
+        let lm_avg = if lc > 0 { lm / lc as f32 } else { 0.0 };
+        let rm_avg = if rc > 0 { rm / rc as f32 } else { 0.0 };
 
-        let legend = Paragraph::new(vec![
-            Line::from(Span::raw(" Head: @  Body: o")),
-            Line::from(Span::raw(format!(" L-motor: {:.0}%", lm * 100.0))),
-            Line::from(Span::raw(format!(" R-motor: {:.0}%", rm * 100.0))),
-            Line::from(Span::raw(format!(" Speed: {:.3}", worm.speed))),
-        ])
-        .block(Block::default().borders(Borders::ALL));
-        let la = Layout::default().direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(22)])
-            .split(area);
-        frame.render_widget(legend, la[1]);
+        let bars = [
+            format!("L-motor {:>5.0}% {}", lm_avg * 100.0,
+                "\u{2588}".repeat((lm_avg * 20.0) as usize)),
+            format!("R-motor {:>5.0}% {}", rm_avg * 100.0,
+                "\u{2588}".repeat((rm_avg * 20.0) as usize)),
+        ];
+
+        let mut list_items: Vec<ListItem> = bars.iter().map(|b| {
+            ListItem::new(Line::from(Span::styled(b, Style::default().fg(Color::Green))))
+        }).collect();
+
+        list_items.push(ListItem::new(Line::from(Span::raw(""))));
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled("Speed ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!("{:.4}", worm.speed)),
+        ])));
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled("Segments ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!("{}", worm.segments.len())),
+        ])));
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled("Phase ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!("{:.2}", worm.body_wave_phase)),
+        ])));
+
+        let legend = List::new(list_items).block(Block::default().borders(Borders::ALL).title(" Motor "));
+        frame.render_widget(legend, chunks[1]);
     }
 
     fn draw_stats(&self, frame: &mut Frame, area: Rect, sim: &Simulation) {
@@ -417,7 +472,7 @@ impl App {
         frame.render_widget(list, chunks[0]);
 
         let rc = Layout::default().direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Length(4), Constraint::Min(0)])
+            .constraints([Constraint::Length(3), Constraint::Length(3), Constraint::Length(5), Constraint::Min(0)])
             .split(chunks[1]);
 
         let ag = Gauge::default()
@@ -433,6 +488,83 @@ impl App {
             .ratio(sr.min(1.0));
         frame.render_widget(sg, rc[1]);
 
+        // Classify neuron groups by name prefix
+        let mut sensory_count = 0u32;
+        let mut motor_count = 0u32;
+        let mut inter_count = 0u32;
+        let mut sensory_active = 0u32;
+        let mut motor_active = 0u32;
+        let mut inter_active = 0u32;
+        let mut sensory_rate = 0.0f32;
+        let mut motor_rate = 0.0f32;
+        let mut inter_rate = 0.0f32;
+
+        for n in &sim.neurons {
+            let rate = n.firing_rate;
+            let is_sensory = n.name.starts_with("AS")
+                || n.name.starts_with("AD")
+                || n.name.starts_with("FLP")
+                || n.name.starts_with("CEP")
+                || n.name.starts_with("IL")
+                || n.name.starts_with("OL");
+            let is_motor = n.name.starts_with("VA")
+                || n.name.starts_with("DA")
+                || n.name.starts_with("VB")
+                || n.name.starts_with("DB")
+                || n.name.starts_with("VC")
+                || n.name.starts_with("VD")
+                || n.name.starts_with("SM")
+                || n.name == "M1" || n.name == "M2" || n.name == "M3" || n.name == "M4" || n.name == "M5";
+
+            if is_sensory {
+                sensory_count += 1;
+                if n.firing { sensory_active += 1; }
+                sensory_rate += rate;
+            } else if is_motor {
+                motor_count += 1;
+                if n.firing { motor_active += 1; }
+                motor_rate += rate;
+            } else {
+                inter_count += 1;
+                if n.firing { inter_active += 1; }
+                inter_rate += rate;
+            }
+        }
+        let sensory_avg = sensory_rate / sensory_count.max(1) as f32;
+        let motor_avg = motor_rate / motor_count.max(1) as f32;
+        let inter_avg = inter_rate / inter_count.max(1) as f32;
+
+        fn bar(rate: f32, color: Color) -> Span<'static> {
+            let filled = (rate * 10.0).min(10.0).round() as usize;
+            Span::styled(
+                "\u{2588}".repeat(filled) + &" ".repeat(10 - filled),
+                Style::default().fg(color),
+            )
+        }
+
+        let group_info = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(" SEN ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:>2}/{:<2}", sensory_active, sensory_count), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{:>5.1}% ", sensory_avg * 100.0), Style::default().fg(Color::Green)),
+                bar(sensory_avg, Color::Cyan),
+            ]),
+            Line::from(vec![
+                Span::styled(" MOT ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:>2}/{:<2}", motor_active, motor_count), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{:>5.1}% ", motor_avg * 100.0), Style::default().fg(Color::Green)),
+                bar(motor_avg, Color::LightRed),
+            ]),
+            Line::from(vec![
+                Span::styled(" INT ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:>2}/{:<2}", inter_active, inter_count), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{:>5.1}% ", inter_avg * 100.0), Style::default().fg(Color::Green)),
+                bar(inter_avg, Color::White),
+            ]),
+        ])
+        .block(Block::default().borders(Borders::ALL).title(" Groups "));
+        frame.render_widget(group_info, rc[2]);
+
         let info = Paragraph::new(vec![
             Line::from(Span::styled("C. elegans Connectome", Style::default().fg(Color::Cyan))),
             Line::from(Span::raw(format!("Chemical: {}", sim.connectome.total_chemical_synapses()))),
@@ -442,7 +574,7 @@ impl App {
             Line::from(Span::raw(format!("Steps: {:.0}", sim.time))),
         ])
         .block(Block::default().borders(Borders::ALL).title(" Stats "));
-        frame.render_widget(info, rc[2]);
+        frame.render_widget(info, rc[3]);
     }
 
     fn draw_credits(&self, frame: &mut Frame, area: Rect) {
@@ -529,6 +661,8 @@ impl App {
 }
 
 fn draw_line(buf: &mut ratatui::buffer::Buffer, x1: u16, y1: u16, x2: u16, y2: u16, color: Color) {
+    let bw = buf.area.width as i32;
+    let bh = buf.area.height as i32;
     let mut x = x1 as i32;
     let mut y = y1 as i32;
     let dx = (x2 as i32 - x1 as i32).abs();
@@ -537,7 +671,7 @@ fn draw_line(buf: &mut ratatui::buffer::Buffer, x1: u16, y1: u16, x2: u16, y2: u
     let sy = if y1 < y2 { 1 } else { -1 };
     let mut err = dx + dy;
     loop {
-        if x >= 0 && y >= 0 && x < 500 && y < 500 {
+        if x >= 0 && y >= 0 && x < bw && y < bh {
             let cell = &mut buf[(x as u16, y as u16)];
             if cell.symbol() == " " || cell.symbol() == "\u{00B7}" {
                 cell.set_char('\u{00B7}');

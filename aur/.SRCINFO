@@ -1,0 +1,18 @@
+pkgbase = biosaka
+	pkgdesc = C. elegans neural simulation in your terminal — 307 neurons, ~2800 synapses, LIF spiking network, ratatui TUI
+	pkgver = 0.2.0
+	pkgrel = 1
+	url = https://github.com/BerkeOruc/biosaka
+	install =
+	arch = x86_64
+	license = custom:BioSaka-Research-License
+	makedepends = cargo
+	makedepends = rust
+	makedepends = git
+	depends = gcc-libs
+	depends = glibc
+	maintainer = Berke Oruc <archberke@hotmail.com>
+	source = git+https://github.com/BerkeOruc/biosaka.git
+	sha256sums = SKIP
+
+pkgname = biosaka
