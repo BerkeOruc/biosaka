@@ -39,15 +39,19 @@ fn main() -> std::io::Result<()> {
     simulation.stimulate_sensory_neurons(0.15);
 
     while app.running {
-        app.handle_input()?;
+        app.handle_input(&mut simulation)?;
+
+        for name in app.pending_stimuli.drain(..) {
+            simulation.stimulate_by_name(&name, 0.5);
+        }
 
         if !app.paused {
-            for _ in 0..3 {
+            for _ in 0..app.speed_multiplier {
                 simulation.step();
             }
             worm.update(&simulation);
 
-            if simulation.time as u64 % 100 == 0 {
+            if app.auto_stim_enabled && simulation.time as u64 % 100 == 0 {
                 simulation.stimulate_sensory_neurons(0.08);
             }
         }
