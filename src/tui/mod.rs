@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::connectome::Connectome;
-use crate::simulation::Simulation;
+use crate::simulation::{Neurotransmitter, SimParams, Simulation};
 use crate::worm::Worm;
 
 const CREDIT_LINES: &[&str] = &[
@@ -79,7 +79,18 @@ const TECH_DOC: &[&str] = &[
     " - noise: Gaussian ~ N(0, 0.02)",
     "",
     " Chemical synapse: when presynaptic neuron fires,",
-    " postsynaptic potential increases by weight * 0.15.",
+    " postsynaptic potential changes based on the",
+    " neurotransmitter released by the presynaptic neuron:",
+    "",
+    "   GABA (inhibitory)    → potential DECREASES by w * 0.20",
+    "   Glutamate (excit.)   → potential INCREASES by w * 0.15",
+    "   Acetylcholine (excit.)→ potential INCREASES by w * 0.15",
+    "   Dopamine/Serotonin   → weak excitation (w * 0.075)",
+    "",
+    " Neurotransmitter type is inferred from each neuron's",
+    " name using WormAtlas conventions. 26 GABAergic neurons",
+    " provide real inhibition — network dynamics shift",
+    " dramatically when they fire.",
     "",
     " Gap junction: direct electrical link between two",
     " neurons. Current flows proportional to potential diff.",
@@ -140,7 +151,7 @@ const TECH_DOC: &[&str] = &[
     " 7. Future Plans",
     " ---------------",
     " - Cook 2019 full dataset integration",
-    " - Neurotransmitter diversity (GABA/glut/acet)",
+    " ✓ Neurotransmitter diversity (GABA/glut/acet)",
     " - Muscle physics, real body simulation",
     " - Keyboard-driven sensory input",
     " - Force-directed graph layout",
@@ -158,7 +169,7 @@ const TECH_DOC: &[&str] = &[
     " [4] Varshney et al. 2011 - PLoS Comput Biol",
     "",
     "",
-    " --- BIOsaka v0.3 ---",
+    " --- BIOsaka v0.1.4 ---",
     " The worm meets bare metal.",
     " Berke Oruc, 2026",
     "",
@@ -177,6 +188,18 @@ pub struct App {
     pub use_force_layout: bool,
     cached_positions: Vec<(u16, u16)>,
     unit_positions: Vec<(f32, f32)>,
+    pub pending_stimuli: Vec<String>,
+    pub stim_message: Option<String>,
+    pub stim_message_ticks: u8,
+    pub auto_stim_enabled: bool,
+    pub speed_multiplier: u32,
+    pub hubness: Vec<u32>,
+    pub neuron_groups: Vec<u8>,
+    pub search_query: String,
+    pub search_results: Vec<usize>,
+    pub search_active: bool,
+    pub param_panel_active: bool,
+    pub param_selected: usize,
 }
 
 impl App {
@@ -200,6 +223,26 @@ impl App {
             })
             .collect();
 
+        let mut hubness = vec![0u32; n];
+        for &(pre, post, _, _) in &edges {
+            if (pre as usize) < n { hubness[pre as usize] += 1; }
+            if (post as usize) < n { hubness[post as usize] += 1; }
+        }
+
+        let neuron_groups: Vec<u8> = (0..n).map(|i| {
+            let name = connectome.neuron_name(i as u16);
+            if name.starts_with("AS") || name.starts_with("AD") || name.starts_with("FLP")
+                || name.starts_with("CEP") || name.starts_with("IL") || name.starts_with("OL") {
+                0
+            } else if name.starts_with("VA") || name.starts_with("DA") || name.starts_with("VB")
+                || name.starts_with("DB") || name.starts_with("VC") || name.starts_with("VD")
+                || name.starts_with("SM") || (name.len() == 2 && name.starts_with("M")) {
+                1
+            } else {
+                2
+            }
+        }).collect();
+
         App {
             running: true,
             paused: false,
@@ -213,11 +256,21 @@ impl App {
             use_force_layout: false,
             cached_positions: Vec::new(),
             unit_positions,
+            pending_stimuli: Vec::new(),
+            stim_message: None,
+            stim_message_ticks: 0,
+            auto_stim_enabled: true,
+            speed_multiplier: 3,
+            hubness,
+            neuron_groups,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_active: false,
+            param_panel_active: false,
+            param_selected: 0,
         }
     }
 
-    /// Compute Fruchterman-Reingold force-directed layout.
-    /// Replaces unit_positions with force-directed positions to reveal functional clusters.
     fn compute_force_layout(&mut self, n: usize) {
         if n == 0 { return; }
         // Simple deterministic LCG (no rand dependency)
@@ -226,17 +279,14 @@ impl App {
             rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             ((rng_state >> 33) as f32) / (1u64 << 31) as f32
         };
-        // Initial positions spread across unit square
         let mut pos: Vec<(f32, f32)> = (0..n)
             .map(|_| (0.15 + rand_f32() * 0.7, 0.15 + rand_f32() * 0.7))
             .collect();
         let area = 0.7 * 0.7;
         let k = (area / n as f32).sqrt();
         let mut temp = 0.5;
-        // Fruchterman-Reingold main loop
         for _ in 0..80 {
             let mut disp = vec![(0.0f32, 0.0f32); n];
-            // Repulsive: all pairs
             for i in 0..n {
                 for j in (i + 1)..n {
                     let dx = pos[j].0 - pos[i].0;
@@ -249,7 +299,6 @@ impl App {
                     disp[j].0 += fx; disp[j].1 += fy;
                 }
             }
-            // Attractive: along edges
             for &(pre, post, _, _) in &self.connectome_edges {
                 let i = pre as usize;
                 let j = post as usize;
@@ -263,7 +312,6 @@ impl App {
                 disp[i].0 += fx; disp[i].1 += fy;
                 disp[j].0 -= fx; disp[j].1 -= fy;
             }
-            // Apply displacement with temperature cooling
             for i in 0..n {
                 let len = (disp[i].0 * disp[i].0 + disp[i].1 * disp[i].1).sqrt().max(0.0001);
                 let scale = if len > temp { temp / len } else { 1.0 };
@@ -278,70 +326,185 @@ impl App {
         self.cached_positions.clear();
     }
 
-    pub fn handle_input(&mut self) -> std::io::Result<()> {
+    fn search_update(&mut self, connectome: &Connectome) {
+        self.search_results.clear();
+        if self.search_query.is_empty() { return; }
+        let q = self.search_query.to_uppercase();
+        let n = connectome.num_neurons() as usize;
+        for i in 0..n {
+            let name = connectome.neuron_name(i as u16).to_uppercase();
+            if name.contains(&q) {
+                self.search_results.push(i);
+            }
+        }
+    }
+
+    pub fn handle_input(&mut self, sim: &mut Simulation) -> std::io::Result<()> {
         if !event::poll(std::time::Duration::from_millis(16))? {
             return Ok(());
         }
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char('q') => { self.running = false; }
-                    KeyCode::Char(' ') => { self.paused = !self.paused; }
-                    KeyCode::Char('+') | KeyCode::Char('=') => {
-                        self.zoom_level = (self.zoom_level * 1.2).min(5.0);
-                        self.cached_positions.clear();
+                if self.search_active {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter => {
+                            if key.code == KeyCode::Esc {
+                                self.search_query.clear();
+                                self.search_results.clear();
+                            }
+                            self.search_active = false;
+                        }
+                        KeyCode::Backspace => {
+                            self.search_query.pop();
+                            self.search_update(&sim.connectome);
+                        }
+                        KeyCode::Char(c) if c.is_alphanumeric() || c == '_' || c == '/' || c == '-' => {
+                            self.search_query.push(c);
+                            self.search_update(&sim.connectome);
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char('-') => { self.zoom_level = (self.zoom_level / 1.2).max(0.2);
-                        self.cached_positions.clear(); }
-                    KeyCode::Left => { self.graph_offset_x -= 5.0 / self.zoom_level;
-                        self.cached_positions.clear(); }
-                    KeyCode::Right => { self.graph_offset_x += 5.0 / self.zoom_level;
-                        self.cached_positions.clear(); }
-                    KeyCode::Up => {
-                        if self.selected_tab == 4 {
-                            self.scroll_offset = self.scroll_offset.saturating_sub(1);
-                        } else {
-                            self.graph_offset_y -= 5.0 / self.zoom_level;
+                } else if self.param_panel_active {
+                    let nparams = SimParams::count();
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('w') => {
+                            self.param_selected = self.param_selected.saturating_sub(1);
+                        }
+                        KeyCode::Down | KeyCode::Char('s') => {
+                            self.param_selected = (self.param_selected + 1).min(nparams - 1);
+                        }
+                        KeyCode::Left | KeyCode::Char('a') => {
+                            let (min, _, step) = sim.params.range(self.param_selected);
+                            let cur = sim.params.get(self.param_selected);
+                            sim.params.set(self.param_selected, cur - step);
+                            if sim.params.get(self.param_selected) < min {
+                                sim.params.set(self.param_selected, min);
+                            }
+                        }
+                        KeyCode::Right | KeyCode::Char('d') => {
+                            let (_, max, step) = sim.params.range(self.param_selected);
+                            let cur = sim.params.get(self.param_selected);
+                            sim.params.set(self.param_selected, cur + step);
+                            if sim.params.get(self.param_selected) > max {
+                                sim.params.set(self.param_selected, max);
+                            }
+                        }
+                        KeyCode::Enter | KeyCode::Esc | KeyCode::Char('t') => {
+                            self.param_panel_active = false;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') => { self.running = false; }
+                        KeyCode::Char(' ') => { self.paused = !self.paused; }
+                        KeyCode::Char('t') => {
+                            self.param_panel_active = !self.param_panel_active;
+                            self.param_selected = 0;
+                        }
+                        KeyCode::Char('/') => {
+                            self.search_active = true;
+                            self.search_query.clear();
+                            self.search_results.clear();
+                        }
+                        KeyCode::Char('+') | KeyCode::Char('=') => {
+                            self.zoom_level = (self.zoom_level * 1.2).min(5.0);
                             self.cached_positions.clear();
                         }
-                    }
-                    KeyCode::Down => {
-                        if self.selected_tab == 4 {
-                            let max = TECH_DOC.len().saturating_sub(10);
-                            self.scroll_offset = self.scroll_offset.saturating_add(1).min(max);
-                        } else {
-                            self.graph_offset_y += 5.0 / self.zoom_level;
-                            self.cached_positions.clear();
+                        KeyCode::Char('-') => { self.zoom_level = (self.zoom_level / 1.2).max(0.2);
+                            self.cached_positions.clear(); }
+                        KeyCode::Left => { self.graph_offset_x -= 5.0 / self.zoom_level;
+                            self.cached_positions.clear(); }
+                        KeyCode::Right => { self.graph_offset_x += 5.0 / self.zoom_level;
+                            self.cached_positions.clear(); }
+                        KeyCode::Up => {
+                            if self.selected_tab == 4 {
+                                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                            } else {
+                                self.graph_offset_y -= 5.0 / self.zoom_level;
+                                self.cached_positions.clear();
+                            }
                         }
-                    }
-                    KeyCode::Tab => { self.selected_tab = (self.selected_tab + 1) % 5; self.scroll_offset = 0; }
-                    KeyCode::Char('1') => { self.selected_tab = 0; self.scroll_offset = 0; }
-                    KeyCode::Char('2') => { self.selected_tab = 1; self.scroll_offset = 0; }
-                    KeyCode::Char('3') => { self.selected_tab = 2; self.scroll_offset = 0; }
-                    KeyCode::Char('c') | KeyCode::Char('C') => { self.selected_tab = 3; self.scroll_offset = 0; }
-                    KeyCode::Char('i') | KeyCode::Char('I') => { self.selected_tab = 4; self.scroll_offset = 0; }
-                    KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('?') => { self.show_help = !self.show_help; }
-                    KeyCode::Char('f') | KeyCode::Char('F') => {
-                        if self.use_force_layout {
-                            // Reset to peanut: re-compute original unit positions
-                            self.use_force_layout = false;
-                            let n = 307;
-                            self.unit_positions = (0..n)
-                                .map(|i| {
-                                    let t = i as f32 / n.max(1) as f32;
-                                    let angle = t * 6.2832;
-                                    let lobe = (angle * 2.0).cos();
-                                    let organic = (angle * 3.0 + 1.0).sin() * 0.015;
-                                    let r = 0.36 + lobe * 0.06 + organic;
-                                    (0.5 + angle.cos() * r * 1.08, 0.5 + angle.sin() * r * 0.95)
-                                })
-                                .collect();
-                            self.cached_positions.clear();
-                        } else {
-                            self.compute_force_layout(307);
+                        KeyCode::Down => {
+                            if self.selected_tab == 4 {
+                                let max = TECH_DOC.len().saturating_sub(10);
+                                self.scroll_offset = self.scroll_offset.saturating_add(1).min(max);
+                            } else {
+                                self.graph_offset_y += 5.0 / self.zoom_level;
+                                self.cached_positions.clear();
+                            }
                         }
+                        KeyCode::Tab => { self.selected_tab = (self.selected_tab + 1) % 5; self.scroll_offset = 0; }
+                        KeyCode::Char('1') => { self.selected_tab = 0; self.scroll_offset = 0; }
+                        KeyCode::Char('2') => { self.selected_tab = 1; self.scroll_offset = 0; }
+                        KeyCode::Char('3') => { self.selected_tab = 2; self.scroll_offset = 0; }
+                        KeyCode::Char('c') | KeyCode::Char('C') => { self.selected_tab = 3; self.scroll_offset = 0; }
+                        KeyCode::Char('i') | KeyCode::Char('I') => { self.selected_tab = 4; self.scroll_offset = 0; }
+                        KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Char('?') => { self.show_help = !self.show_help; }
+                        KeyCode::Char('f') | KeyCode::Char('F') => {
+                            if self.use_force_layout {
+                                self.use_force_layout = false;
+                                let n = 307;
+                                self.unit_positions = (0..n)
+                                    .map(|i| {
+                                        let t = i as f32 / n.max(1) as f32;
+                                        let angle = t * 6.2832;
+                                        let lobe = (angle * 2.0).cos();
+                                        let organic = (angle * 3.0 + 1.0).sin() * 0.015;
+                                        let r = 0.36 + lobe * 0.06 + organic;
+                                        (0.5 + angle.cos() * r * 1.08, 0.5 + angle.sin() * r * 0.95)
+                                    })
+                                    .collect();
+                                self.cached_positions.clear();
+                            } else {
+                                self.compute_force_layout(307);
+                            }
+                        }
+                        KeyCode::Char('j') => {
+                            self.pending_stimuli.push("ASEL".to_string());
+                            self.stim_message = Some("Stim: ASEL ".to_string());
+                            self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char('k') => {
+                            self.pending_stimuli.push("ASER".to_string());
+                            self.stim_message = Some("Stim: ASER ".to_string());
+                            self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char('u') => {
+                            self.pending_stimuli.push("AWAL".to_string());
+                            self.stim_message = Some("Stim: AWAL ".to_string());
+                            self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char('o') => {
+                            self.pending_stimuli.push("AWAR".to_string());
+                            self.stim_message = Some("Stim: AWAR ".to_string());
+                            self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char('p') => {
+                            self.auto_stim_enabled = !self.auto_stim_enabled;
+                            self.stim_message = if self.auto_stim_enabled {
+                                Some("Auto-stim ON ".to_string())
+                            } else {
+                                Some("Auto-stim OFF".to_string())
+                            };
+                            self.stim_message_ticks = 30;
+                        }
+                        KeyCode::Char('[') => {
+                            let speeds = [1, 3, 10, 30, 100];
+                            let idx = speeds.iter().position(|&s| s == self.speed_multiplier).unwrap_or(2);
+                            self.speed_multiplier = if idx > 0 { speeds[idx - 1] } else { speeds[0] };
+                            self.stim_message = Some(format!("Speed {}x ", self.speed_multiplier));
+                            self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char(']') => {
+                            let speeds = [1, 3, 10, 30, 100];
+                            let idx = speeds.iter().position(|&s| s == self.speed_multiplier).unwrap_or(2);
+                            self.speed_multiplier = if idx < speeds.len() - 1 { speeds[idx + 1] } else { speeds[speeds.len() - 1] };
+                            self.stim_message = Some(format!("Speed {}x ", self.speed_multiplier));
+                            self.stim_message_ticks = 15;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -353,11 +516,20 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
             .split(frame.area());
+        if self.stim_message_ticks > 0 {
+            self.stim_message_ticks -= 1;
+            if self.stim_message_ticks == 0 {
+                self.stim_message = None;
+            }
+        }
         self.draw_header(frame, chunks[0], sim);
         self.draw_main(frame, chunks[1], sim, worm);
         self.draw_footer(frame, chunks[2]);
         if self.show_help {
             self.draw_help_overlay(frame, frame.area());
+        }
+        if self.param_panel_active {
+            self.draw_params_panel(frame, frame.area(), sim);
         }
     }
 
@@ -373,7 +545,7 @@ impl App {
         let s = time_secs % 60;
 
         let title = Paragraph::new(Line::from(Span::styled(
-            " BioSaka v0.3 - C. elegans ",
+            " BioSaka v0.1.4 - C. elegans ",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )))
         .block(Block::default().borders(Borders::ALL));
@@ -388,16 +560,35 @@ impl App {
                 format!("|Spikes:{} ", sim.total_spikes),
                 Style::default().fg(Color::Green),
             ),
+            Span::styled(
+                format!("|{}x ", self.speed_multiplier),
+                Style::default().fg(Color::Magenta),
+            ),
         ]))
         .block(Block::default().borders(Borders::ALL));
 
         let ctrl = Paragraph::new(Line::from(vec![
-            if self.paused {
+            if self.search_active {
+                Span::styled(
+                    format!(" Search: {}█ ", self.search_query),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )
+            } else if self.paused {
                 Span::styled(" PAUSED ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
             } else {
                 Span::raw(" [SPC]pause ")
             },
             Span::raw("[q]quit [c]redits [i]nfo "),
+            if !self.search_results.is_empty() {
+                Span::styled(
+                    format!("[{}] ", self.search_results.len()),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )
+            } else if let Some(ref msg) = self.stim_message {
+                Span::styled(msg.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            } else {
+                Span::raw("")
+            },
         ]))
         .block(Block::default().borders(Borders::ALL));
 
@@ -420,9 +611,12 @@ impl App {
     fn draw_graph(&mut self, frame: &mut Frame, area: Rect, sim: &Simulation) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Neural Network ({:.1}x) | 307n {}e{}",
+            .title(format!(" Neural Network ({:.1}x) | 307n {}e{}{}",
                 self.zoom_level, self.connectome_edges.len(),
-                if self.use_force_layout { " force" } else { "" }));
+                if self.use_force_layout { " force" } else { "" },
+                if !self.search_results.is_empty() {
+                    format!(" | search: {}", self.search_results.len())
+                } else { String::new() }));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let buf = frame.buffer_mut();
@@ -432,11 +626,9 @@ impl App {
         let aspect = ch / cw;
 
         let positions: Vec<(u16, u16)> = if self.cached_positions.len() == n {
-            // Cached — just re-center (avoids trig & zoom/pan recompute)
             self.cached_positions.clone()
         } else {
             if self.use_force_layout && self.unit_positions.len() == n {
-                // Force-directed layout: use precomputed unit positions
                 (0..n).map(|i| {
                     let (ux, uy) = self.unit_positions[i];
                     let uy_adj = 0.5 + (uy - 0.5) * aspect;
@@ -447,7 +639,6 @@ impl App {
                     (px, py)
                 }).collect()
             } else {
-                // Peanut layout: compute from unit_positions with aspect
                 (0..n).map(|i| {
                     let (ux, uy) = self.unit_positions[i];
                     let y_with_aspect = 0.5 + (uy - 0.5) * aspect;
@@ -459,7 +650,6 @@ impl App {
                 }).collect()
             }
         };
-        // Cache for next frame
         self.cached_positions = positions.clone();
 
         let step = (self.connectome_edges.len() / 1500).max(1);
@@ -467,16 +657,23 @@ impl App {
             let (pre, post, _, etype) = self.connectome_edges[idx];
             if let (Some(&(x1, y1)), Some(&(x2, y2))) = (positions.get(pre as usize), positions.get(post as usize)) {
                 let mid_active = sim.neurons[pre as usize].firing as u8 + sim.neurons[post as usize].firing as u8;
-                let base = if etype == 1 { Color::Gray } else { Color::DarkGray };
+                let base = if etype == 1 { Color::Cyan } else { Color::Yellow };
                 let c = if mid_active > 0 { Color::White } else { base };
                 draw_line(buf, x1, y1, x2, y2, c);
             }
         }
 
+        
+        let has_search = !self.search_results.is_empty();
         for (i, &(px, py)) in positions.iter().enumerate() {
             if px >= inner.x + 1 && px < inner.x + inner.width - 1 && py >= inner.y + 1 && py < inner.y + inner.height - 1 {
+                if has_search && !self.search_results.contains(&i) { continue; }
                 let rate = sim.neurons[i].firing_rate;
-                let (color, bold) = if sim.neurons[i].firing {
+                let is_hub = self.hubness.get(i).copied().unwrap_or(0) > 20;
+
+                let (color, bold) = if has_search {
+                    (Color::Magenta, true)
+                } else if sim.neurons[i].firing {
                     (Color::Yellow, true)
                 } else if rate > 0.08 {
                     (Color::LightGreen, true)
@@ -486,12 +683,19 @@ impl App {
                     (Color::Cyan, false)
                 } else if rate > 0.005 {
                     (Color::Blue, false)
+                } else if self.use_force_layout {
+                    match self.neuron_groups.get(i).copied().unwrap_or(2) {
+                        0 => (Color::DarkGray, false),
+                        1 => (Color::Red, false),
+                        _ => (Color::DarkGray, false),
+                    }
                 } else {
                     (Color::DarkGray, false)
                 };
                 let dot = if sim.neurons[i].firing { '\u{25C9}' } else { '\u{25CF}' };
                 buf[(px, py)].set_char(dot);
-                if bold {
+                let final_bold = bold || is_hub;
+                if final_bold {
                     buf[(px, py)].set_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
                 } else {
                     buf[(px, py)].set_fg(color);
@@ -499,7 +703,6 @@ impl App {
             }
         }
 
-        // Label top active neurons
         let mut active: Vec<(usize, f32)> = (0..positions.len())
             .map(|i| (i, sim.neurons[i].firing_rate)).collect();
         active.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -508,13 +711,27 @@ impl App {
             let (px, py) = positions[i];
             if py >= inner.y + 1 && py < inner.y + inner.height - 1 {
                 let name = sim.connectome.neuron_name(i as u16);
+                let nt_label = sim.neurons[i].neurotransmitter.label();
+                let nt_color = match sim.neurons[i].neurotransmitter.color_idx() {
+                    0 => Color::Red,
+                    1 => Color::Green,
+                    2 => Color::Cyan,
+                    3 => Color::Yellow,
+                    4 => Color::Magenta,
+                    _ => Color::DarkGray,
+                };
+                let full_label = format!("{} [{}]", name, nt_label);
                 let x0 = px + 2;
-                let name_len = name.len() as u16;
-                if x0 + name_len < inner.x + inner.width {
-                    for (ci, c) in name.chars().enumerate() {
+                let label_len = full_label.len() as u16;
+                if x0 + label_len < inner.x + inner.width {
+                    for (ci, c) in full_label.chars().enumerate() {
                         let cell = &mut buf[(x0 + ci as u16, py)];
                         cell.set_char(c);
-                        cell.set_fg(Color::DarkGray);
+                        if ci < name.len() || c == '[' || c == ']' {
+                            cell.set_fg(Color::DarkGray);
+                        } else {
+                            cell.set_fg(nt_color);
+                        }
                     }
                 }
             }
@@ -638,7 +855,6 @@ impl App {
             .ratio(sr.min(1.0));
         frame.render_widget(sg, rc[1]);
 
-        // Classify neuron groups by name prefix
         let mut sensory_count = 0u32;
         let mut motor_count = 0u32;
         let mut inter_count = 0u32;
@@ -715,15 +931,71 @@ impl App {
         .block(Block::default().borders(Borders::ALL).title(" Groups "));
         frame.render_widget(group_info, rc[2]);
 
-        let info = Paragraph::new(vec![
+        let sync_idx = (total_active as f32 / sim.neurons.len() as f32).powi(2);
+        let mut low = 0u32; let mut med = 0u32; let mut high = 0u32;
+        for n in &sim.neurons {
+            if n.firing_rate <= 0.02 { low += 1; }
+            else if n.firing_rate <= 0.08 { med += 1; }
+            else { high += 1; }
+        }
+
+        let mut gaba_count = 0u32;
+        let mut glu_count = 0u32;
+        let mut ach_count = 0u32;
+        for n in &sim.neurons {
+            match n.neurotransmitter {
+                Neurotransmitter::GABA => gaba_count += 1,
+                Neurotransmitter::Glutamate => glu_count += 1,
+                Neurotransmitter::Acetylcholine => ach_count += 1,
+                _ => {}
+            }
+        }
+
+        let mut hubs: Vec<(u16, u32)> = (0..sim.neurons.len() as u16)
+            .map(|i| (i, self.hubness.get(i as usize).copied().unwrap_or(0)))
+            .collect();
+        hubs.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut hub_lines: Vec<Line> = hubs.iter().take(5).map(|&(id, cnt)| {
+            Line::from(vec![
+                Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(sim.neurons[id as usize].name.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" ({})", cnt), Style::default().fg(Color::DarkGray)),
+            ])
+        }).collect();
+        if hub_lines.is_empty() {
+            hub_lines.push(Line::from(Span::raw("")));
+        }
+
+        let mut info_lines = vec![
             Line::from(Span::styled("C. elegans Connectome", Style::default().fg(Color::Cyan))),
             Line::from(Span::raw(format!("Chemical: {}", sim.connectome.total_chemical_synapses()))),
             Line::from(Span::raw(format!("Gap junct: {}", sim.connectome.total_gap_junctions()))),
             Line::from(Span::raw(format!("Active: {}/{}", total_active, sim.neurons.len()))),
             Line::from(Span::raw(format!("Total spikes: {}", sim.total_spikes))),
             Line::from(Span::raw(format!("Steps: {:.0}", sim.time))),
-        ])
-        .block(Block::default().borders(Borders::ALL).title(" Stats "));
+            Line::from(Span::raw("")),
+            Line::from(vec![
+                Span::styled("Sync idx ", Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:.3}", sync_idx), Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::styled("Rate dist ", Style::default().fg(Color::Cyan)),
+                Span::styled(format!("L:{} ", low), Style::default().fg(Color::Blue)),
+                Span::styled(format!("M:{} ", med), Style::default().fg(Color::Green)),
+                Span::styled(format!("H:{}", high), Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::styled("NT ", Style::default().fg(Color::Cyan)),
+                Span::styled(format!("GABA:{} ", gaba_count), Style::default().fg(Color::Red)),
+                Span::styled(format!("Glu:{} ", glu_count), Style::default().fg(Color::Green)),
+                Span::styled(format!("ACh:{}", ach_count), Style::default().fg(Color::Cyan)),
+            ]),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled("Hubs:", Style::default().fg(Color::Cyan))),
+        ];
+        info_lines.extend(hub_lines);
+        let info = Paragraph::new(info_lines)
+            .block(Block::default().borders(Borders::ALL).title(" Stats "));
         frame.render_widget(info, rc[3]);
     }
 
@@ -799,6 +1071,7 @@ impl App {
             " [C]redit ",
             " [I]nfo ",
             " [H]elp ",
+            " [j]stim ",
         ];
         let spans: Vec<Span> = tabs.iter().enumerate().map(|(i, name)| {
             if i == self.selected_tab {
@@ -810,6 +1083,49 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL)), area);
     }
 
+    fn draw_params_panel(&self, frame: &mut Frame, area: Rect, sim: &Simulation) {
+        let panel_w = 38.min(area.width.saturating_sub(4));
+        let panel_h = 10.min(area.height.saturating_sub(4));
+        let x = (area.width - panel_w) / 2;
+        let y = (area.height - panel_h) / 2;
+        let overlay = Rect { x, y, width: panel_w, height: panel_h };
+        frame.render_widget(Clear, overlay);
+
+        let param_colors = [Color::Yellow, Color::Magenta, Color::Cyan, Color::Green];
+        let labels = SimParams::labels();
+
+        let mut lines: Vec<Line> = Vec::new();
+        for i in 0..SimParams::count() {
+            let val = sim.params.get(i);
+            let (min, max, _step) = sim.params.range(i);
+            let selected = i == self.param_selected;
+            let marker = if selected { "\u{25B6} " } else { "  " };
+            let bar_len = ((val - min) / (max - min).max(0.001) * 10.0).round() as usize;
+            let bar = "\u{2588}".repeat(bar_len) + &"\u{2591}".repeat(10 - bar_len);
+            let style = if selected {
+                Style::default().fg(param_colors[i]).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(param_colors[i])
+            };
+            let val_style = Style::default().fg(Color::White);
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}{:<8}", marker, labels[i]), style),
+                Span::styled(format!(" {:.3} ", val), val_style),
+                Span::styled(bar, Style::default().fg(param_colors[i])),
+            ]));
+        }
+        lines.push(Line::from(Span::raw("")));
+        lines.push(Line::from(Span::styled(
+            " \u{2191}\u{2193} select  \u{2190}\u{2192} adjust  [t] close",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let para = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Parameters "))
+            .style(Style::default().fg(Color::White).bg(Color::Black));
+        frame.render_widget(para, overlay);
+    }
+
     fn draw_help_overlay(&self, frame: &mut Frame, area: Rect) {
         let help_w = 44.min(area.width.saturating_sub(4));
         let help_h = 20.min(area.height.saturating_sub(4));
@@ -817,7 +1133,7 @@ impl App {
         let y = (area.height - help_h) / 2;
         let overlay = Rect { x, y, width: help_w, height: help_h };
         frame.render_widget(Clear, overlay);
-        let help_data: [(&str, Color, bool); 14] = [
+        let help_data: [(&str, Color, bool); 25] = [
             (" Controls ", Color::Cyan, true),
             ("", Color::White, false),
             (" [1] [2] [3]  switch tabs", Color::White, false),
@@ -827,7 +1143,18 @@ impl App {
             (" [Space]      pause/resume", Color::White, false),
             (" [+]/[-]      zoom in/out", Color::White, false),
             (" [Arrows]     pan (graph) / scroll (info)", Color::White, false),
-            (" [f]          toggle force layout", Color::White, false),
+             (" [f]          toggle force layout", Color::White, false),
+             (" [t]          parameter tuning panel", Color::White, false),
+             (" []/[]        speed up/down", Color::White, false),
+            (" [/]          search neuron", Color::White, false),
+            ("", Color::White, false),
+            (" Stimulation ", Color::Green, true),
+            (" [j]          poke ASEL (head left)", Color::White, false),
+            (" [k]          poke ASER (head right)", Color::White, false),
+            (" [u]          poke AWAL (olfaction L)", Color::White, false),
+            (" [o]          poke AWAR (olfaction R)", Color::White, false),
+            (" [p]          toggle auto-stimulation", Color::White, false),
+            ("", Color::White, false),
             (" [q]          quit", Color::White, false),
             ("", Color::White, false),
             (" 307 neurons | 2847 edges", Color::DarkGray, false),
