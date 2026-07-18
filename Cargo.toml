@@ -1,8 +1,8 @@
 [package]
 name = "biosaka"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
-description = "C. elegans neural simulation — 307 neurons, ~2800 synapses, LIF spiking network in your terminal"
+description = "C. elegans dual-sex neural simulation — herm 307n/2847e, male 379n/3159e, LIF spiking, ratatui TUI"
 license = "MIT"
 repository = "https://github.com/BerkeOruc/biosaka"
 homepage = "https://github.com/BerkeOruc/biosaka"
@@ -19,3 +19,4 @@ crossterm = "0.28"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+clap = { version = "4", features = ["derive"] }

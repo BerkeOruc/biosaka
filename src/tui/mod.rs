@@ -200,6 +200,39 @@ pub struct App {
     pub search_active: bool,
     pub param_panel_active: bool,
     pub param_selected: usize,
+    pub record_buffer: Vec<Vec<u8>>,
+    pub is_recording: bool,
+    pub playback_frame: Option<usize>,
+    pub sex_label: String,
+    pub herm_label: String,
+    pub is_male_specific: Vec<bool>,
+}
+
+fn is_male_neuron(name: &str) -> bool {
+    if name.starts_with("CP") || name.starts_with("HOB") || name.starts_with("CEM")
+        || name.starts_with("SPCH") || name.starts_with("SPD") || name.starts_with("SPV")
+        || name.starts_with("PCA") || name.starts_with("PCB")
+        || name.starts_with("PDE") || name.starts_with("PDP")
+    {
+        return true;
+    }
+    if name.starts_with("R") && name.len() >= 2 {
+        if name[1..].chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    if name.starts_with("SA") && !name.starts_with("SAA") && !name.starts_with("SAB") && !name.starts_with("SAS") {
+        return true;
+    }
+    if (name.starts_with("VA") || name.starts_with("VB") || name.starts_with("DA")) && name.len() > 2 {
+        if let Ok(n) = name[2..].parse::<u8>() {
+            if n >= 10 { return true; }
+        }
+    }
+    if name.starts_with("VC") && name.len() > 2 {
+        if matches!(name[2..].as_ref(), "6" | "7") { return true; }
+    }
+    false
 }
 
 impl App {
@@ -232,16 +265,25 @@ impl App {
         let neuron_groups: Vec<u8> = (0..n).map(|i| {
             let name = connectome.neuron_name(i as u16);
             if name.starts_with("AS") || name.starts_with("AD") || name.starts_with("FLP")
-                || name.starts_with("CEP") || name.starts_with("IL") || name.starts_with("OL") {
+                || name.starts_with("CEP") || name.starts_with("IL") || name.starts_with("OL")
+                || name.starts_with("CEM") || (name.starts_with("SA") && !name.starts_with("SAA"))
+            {
                 0
             } else if name.starts_with("VA") || name.starts_with("DA") || name.starts_with("VB")
                 || name.starts_with("DB") || name.starts_with("VC") || name.starts_with("VD")
-                || name.starts_with("SM") || (name.len() == 2 && name.starts_with("M")) {
+                || name.starts_with("SM") || (name.len() == 2 && name.starts_with("M"))
+                || name.starts_with("CP") || name.starts_with("HOB")
+                || name.starts_with("SPCH") || name.starts_with("SPD") || name.starts_with("SPV")
+            {
                 1
             } else {
                 2
             }
         }).collect();
+
+        let is_male_specific: Vec<bool> = (0..n)
+            .map(|i| is_male_neuron(connectome.neuron_name(i as u16)))
+            .collect();
 
         App {
             running: true,
@@ -268,6 +310,12 @@ impl App {
             search_active: false,
             param_panel_active: false,
             param_selected: 0,
+            record_buffer: Vec::new(),
+            is_recording: false,
+            playback_frame: None,
+            sex_label: "Hermaphrodite".to_string(),
+            herm_label: "307n | 2847e".to_string(),
+            is_male_specific,
         }
     }
 
@@ -339,7 +387,7 @@ impl App {
         }
     }
 
-    pub fn handle_input(&mut self, sim: &mut Simulation) -> std::io::Result<()> {
+    pub fn handle_input(&mut self, sim: &mut Simulation, worm: &mut Worm) -> std::io::Result<()> {
         if !event::poll(std::time::Duration::from_millis(16))? {
             return Ok(());
         }
@@ -397,7 +445,12 @@ impl App {
                 } else {
                     match key.code {
                         KeyCode::Char('q') => { self.running = false; }
-                        KeyCode::Char(' ') => { self.paused = !self.paused; }
+                        KeyCode::Char(' ') => {
+                            self.paused = !self.paused;
+                            if !self.paused {
+                                self.playback_frame = None;
+                            }
+                        }
                         KeyCode::Char('t') => {
                             self.param_panel_active = !self.param_panel_active;
                             self.param_selected = 0;
@@ -444,7 +497,7 @@ impl App {
                         KeyCode::Char('f') | KeyCode::Char('F') => {
                             if self.use_force_layout {
                                 self.use_force_layout = false;
-                                let n = 307;
+                                let n = self.unit_positions.len();
                                 self.unit_positions = (0..n)
                                     .map(|i| {
                                         let t = i as f32 / n.max(1) as f32;
@@ -457,7 +510,7 @@ impl App {
                                     .collect();
                                 self.cached_positions.clear();
                             } else {
-                                self.compute_force_layout(307);
+                                self.compute_force_layout(self.unit_positions.len());
                             }
                         }
                         KeyCode::Char('j') => {
@@ -489,6 +542,11 @@ impl App {
                             };
                             self.stim_message_ticks = 30;
                         }
+                        KeyCode::Char('e') => {
+                            worm.add_random_obstacle();
+                            self.stim_message = Some(format!("Obstacle {} ", worm.obstacle_count));
+                            self.stim_message_ticks = 30;
+                        }
                         KeyCode::Char('[') => {
                             let speeds = [1, 3, 10, 30, 100];
                             let idx = speeds.iter().position(|&s| s == self.speed_multiplier).unwrap_or(2);
@@ -502,6 +560,42 @@ impl App {
                             self.speed_multiplier = if idx < speeds.len() - 1 { speeds[idx + 1] } else { speeds[speeds.len() - 1] };
                             self.stim_message = Some(format!("Speed {}x ", self.speed_multiplier));
                             self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char('r') => {
+                            if self.is_recording {
+                                self.is_recording = false;
+                                let len = self.record_buffer.len();
+                                self.stim_message = Some(format!("Record stop ({} frames) ", len));
+                            } else {
+                                self.record_buffer.clear();
+                                self.playback_frame = None;
+                                self.is_recording = true;
+                                self.stim_message = Some("Record start ".to_string());
+                            }
+                            self.stim_message_ticks = 30;
+                        }
+                        KeyCode::Char(',') => {
+                            if !self.record_buffer.is_empty() {
+                                self.paused = true;
+                                let idx = self.playback_frame.unwrap_or(self.record_buffer.len().saturating_sub(1));
+                                self.playback_frame = Some(idx.saturating_sub(1));
+                                self.stim_message = Some(format!("Frame {}/{} ",
+                                    self.playback_frame.unwrap(),
+                                    self.record_buffer.len().saturating_sub(1)));
+                                self.stim_message_ticks = 30;
+                            }
+                        }
+                        KeyCode::Char('.') => {
+                            if !self.record_buffer.is_empty() {
+                                self.paused = true;
+                                let idx = self.playback_frame.unwrap_or(0);
+                                let next = (idx + 1).min(self.record_buffer.len().saturating_sub(1));
+                                self.playback_frame = Some(next);
+                                self.stim_message = Some(format!("Frame {}/{} ",
+                                    next,
+                                    self.record_buffer.len().saturating_sub(1)));
+                                self.stim_message_ticks = 30;
+                            }
                         }
                         _ => {}
                     }
@@ -609,14 +703,22 @@ impl App {
     }
 
     fn draw_graph(&mut self, frame: &mut Frame, area: Rect, sim: &Simulation) {
+        let recording_tag = if self.is_recording {
+            " REC"
+        } else if self.playback_frame.is_some() {
+            " PLAY"
+        } else {
+            ""
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Neural Network ({:.1}x) | 307n {}e{}{}",
-                self.zoom_level, self.connectome_edges.len(),
+            .title(format!(" Neural Network ({:.1}x) | {} {}e{}{}{}",
+                self.zoom_level, self.sex_label, self.connectome_edges.len(),
                 if self.use_force_layout { " force" } else { "" },
                 if !self.search_results.is_empty() {
                     format!(" | search: {}", self.search_results.len())
-                } else { String::new() }));
+                } else { String::new() },
+                recording_tag));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let buf = frame.buffer_mut();
@@ -652,11 +754,18 @@ impl App {
         };
         self.cached_positions = positions.clone();
 
+        let firing_at = |i: usize| -> bool {
+            if let Some(f) = self.playback_frame {
+                self.record_buffer.get(f).and_then(|b| b.get(i).copied()).unwrap_or(0) != 0
+            } else {
+                sim.neurons.get(i).map_or(false, |n| n.firing)
+            }
+        };
         let step = (self.connectome_edges.len() / 1500).max(1);
         for idx in (0..self.connectome_edges.len()).step_by(step) {
             let (pre, post, _, etype) = self.connectome_edges[idx];
             if let (Some(&(x1, y1)), Some(&(x2, y2))) = (positions.get(pre as usize), positions.get(post as usize)) {
-                let mid_active = sim.neurons[pre as usize].firing as u8 + sim.neurons[post as usize].firing as u8;
+                let mid_active = firing_at(pre as usize) as u8 + firing_at(post as usize) as u8;
                 let base = if etype == 1 { Color::Cyan } else { Color::Yellow };
                 let c = if mid_active > 0 { Color::White } else { base };
                 draw_line(buf, x1, y1, x2, y2, c);
@@ -668,12 +777,17 @@ impl App {
         for (i, &(px, py)) in positions.iter().enumerate() {
             if px >= inner.x + 1 && px < inner.x + inner.width - 1 && py >= inner.y + 1 && py < inner.y + inner.height - 1 {
                 if has_search && !self.search_results.contains(&i) { continue; }
-                let rate = sim.neurons[i].firing_rate;
                 let is_hub = self.hubness.get(i).copied().unwrap_or(0) > 20;
+                let (firing, rate) = if let Some(f) = self.playback_frame {
+                    let fb = self.record_buffer.get(f).and_then(|b| b.get(i).copied()).unwrap_or(0) != 0;
+                    (fb, if fb { 0.1 } else { 0.0 })
+                } else {
+                    (sim.neurons[i].firing, sim.neurons[i].firing_rate)
+                };
 
                 let (color, bold) = if has_search {
                     (Color::Magenta, true)
-                } else if sim.neurons[i].firing {
+                } else if firing {
                     (Color::Yellow, true)
                 } else if rate > 0.08 {
                     (Color::LightGreen, true)
@@ -683,6 +797,12 @@ impl App {
                     (Color::Cyan, false)
                 } else if rate > 0.005 {
                     (Color::Blue, false)
+                } else if !firing && self.sex_label == "Male" && i < self.is_male_specific.len() && self.is_male_specific[i] {
+                    match self.neuron_groups.get(i).copied().unwrap_or(2) {
+                        0 => (Color::Cyan, false),
+                        1 => (Color::Magenta, false),
+                        _ => (Color::Yellow, false),
+                    }
                 } else if self.use_force_layout {
                     match self.neuron_groups.get(i).copied().unwrap_or(2) {
                         0 => (Color::DarkGray, false),
@@ -692,7 +812,7 @@ impl App {
                 } else {
                     (Color::DarkGray, false)
                 };
-                let dot = if sim.neurons[i].firing { '\u{25C9}' } else { '\u{25CF}' };
+                let dot = if firing { '\u{25C9}' } else { '\u{25CF}' };
                 buf[(px, py)].set_char(dot);
                 let final_bold = bold || is_hub;
                 if final_bold {
@@ -704,7 +824,15 @@ impl App {
         }
 
         let mut active: Vec<(usize, f32)> = (0..positions.len())
-            .map(|i| (i, sim.neurons[i].firing_rate)).collect();
+            .map(|i| {
+                let r = if let Some(f) = self.playback_frame {
+                    let fb = self.record_buffer.get(f).and_then(|b| b.get(i).copied()).unwrap_or(0) != 0;
+                    if fb { 0.1 } else { 0.0 }
+                } else {
+                    sim.neurons[i].firing_rate
+                };
+                (i, r)
+            }).collect();
         active.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         for &(i, rate) in active.iter().take(8) {
             if rate < 0.02 { break; }
@@ -753,6 +881,8 @@ impl App {
         let cx = worm.body_center_x();
         let cy = worm.body_center_y();
 
+        let is_male = self.sex_label == "Male";
+        let tail_start = worm.segments.len().saturating_sub(3);
         for (i, seg) in worm.segments.iter().enumerate() {
             let px = ((seg.x - cx + 0.5) * cw * 0.8 + cw * 0.1) as u16 + inner.x;
             let py = ((seg.y - cy + 0.5) * ch * 0.8 + ch * 0.1) as u16 + inner.y;
@@ -760,6 +890,8 @@ impl App {
                 let frac = i as f32 / worm.segments.len().max(1) as f32;
                 let (ch, color) = if i == 0 {
                     ('\u{2588}', Color::LightRed)
+                } else if is_male && i >= tail_start {
+                    ('\u{25C9}', Color::Green)
                 } else if frac < 0.15 {
                     ('\u{25CF}', Color::Red)
                 } else if frac < 0.40 {
@@ -771,6 +903,40 @@ impl App {
                 };
                 buf[(px, py)].set_char(ch);
                 buf[(px, py)].set_fg(color);
+            }
+        }
+        if !is_male {
+            let vulva_idx = 10.min(worm.segments.len().saturating_sub(1));
+            if let Some(seg) = worm.segments.get(vulva_idx) {
+                let px = ((seg.x - cx + 0.5) * cw * 0.8 + cw * 0.1) as u16 + inner.x;
+                let py = ((seg.y - cy + 0.5) * ch * 0.8 + ch * 0.1) as u16 + inner.y;
+                if px < inner.x + inner.width && py < inner.y + inner.height && px > inner.x && py > inner.y {
+                    buf[(px, py)].set_char('\u{25C6}');
+                    buf[(px, py)].set_fg(Color::LightRed);
+                }
+            }
+        }
+
+        // Obstacles
+        let cw = inner.width.max(1) as f32;
+        let ch = inner.height.max(1) as f32;
+        let cx = worm.body_center_x();
+        let cy = worm.body_center_y();
+        for ob in &worm.obstacles {
+            let x1 = ((ob.x - cx + 0.5) * cw * 0.8 + cw * 0.1) as u16 + inner.x;
+            let y1 = ((ob.y - cy + 0.5) * ch * 0.8 + ch * 0.1) as u16 + inner.y;
+            let x2 = ((ob.x + ob.w - cx + 0.5) * cw * 0.8 + cw * 0.1) as u16 + inner.x;
+            let y2 = ((ob.y + ob.h - cy + 0.5) * ch * 0.8 + ch * 0.1) as u16 + inner.y;
+            for px in x1..=x2.min(inner.x + inner.width - 1) {
+                for py in y1..=y2.min(inner.y + inner.height - 1) {
+                    if px >= inner.x && py >= inner.y {
+                        let cell = &mut buf[(px, py)];
+                        if cell.symbol() == " " {
+                            cell.set_char('\u{2588}');
+                            cell.set_fg(Color::Red);
+                        }
+                    }
+                }
             }
         }
 
@@ -810,6 +976,14 @@ impl App {
         list_items.push(ListItem::new(Line::from(vec![
             Span::styled("Phase ", Style::default().fg(Color::Cyan)),
             Span::raw(format!("{:.2}", worm.body_wave_phase)),
+        ])));
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled("Obstacles ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!("{}  [e] add", worm.obstacle_count)),
+        ])));
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled("Sex ", Style::default().fg(Color::Cyan)),
+            Span::styled(self.sex_label.clone(), Style::default().fg(Color::LightGreen)),
         ])));
 
         let legend = List::new(list_items).block(Block::default().borders(Borders::ALL).title(" Motor "));
@@ -872,7 +1046,9 @@ impl App {
                 || n.name.starts_with("FLP")
                 || n.name.starts_with("CEP")
                 || n.name.starts_with("IL")
-                || n.name.starts_with("OL");
+                || n.name.starts_with("OL")
+                || n.name.starts_with("CEM")
+                || (n.name.starts_with("SA") && !n.name.starts_with("SAA"));
             let is_motor = n.name.starts_with("VA")
                 || n.name.starts_with("DA")
                 || n.name.starts_with("VB")
@@ -880,7 +1056,9 @@ impl App {
                 || n.name.starts_with("VC")
                 || n.name.starts_with("VD")
                 || n.name.starts_with("SM")
-                || n.name == "M1" || n.name == "M2" || n.name == "M3" || n.name == "M4" || n.name == "M5";
+                || n.name == "M1" || n.name == "M2" || n.name == "M3" || n.name == "M4" || n.name == "M5"
+                || n.name.starts_with("CP") || n.name.starts_with("HOB")
+                || n.name.starts_with("SPCH") || n.name.starts_with("SPD") || n.name.starts_with("SPV");
 
             if is_sensory {
                 sensory_count += 1;
@@ -972,6 +1150,7 @@ impl App {
             Line::from(Span::raw(format!("Gap junct: {}", sim.connectome.total_gap_junctions()))),
             Line::from(Span::raw(format!("Active: {}/{}", total_active, sim.neurons.len()))),
             Line::from(Span::raw(format!("Total spikes: {}", sim.total_spikes))),
+            Line::from(Span::styled(format!("Sex: {:15}  {}", self.sex_label, self.herm_label), Style::default().fg(Color::LightGreen))),
             Line::from(Span::raw(format!("Steps: {:.0}", sim.time))),
             Line::from(Span::raw("")),
             Line::from(vec![
@@ -1133,7 +1312,8 @@ impl App {
         let y = (area.height - help_h) / 2;
         let overlay = Rect { x, y, width: help_w, height: help_h };
         frame.render_widget(Clear, overlay);
-        let help_data: [(&str, Color, bool); 25] = [
+        let sex_display = format!("C. elegans {}", self.sex_label.to_lowercase());
+        let help_data: [(&str, Color, bool); 30] = [
             (" Controls ", Color::Cyan, true),
             ("", Color::White, false),
             (" [1] [2] [3]  switch tabs", Color::White, false),
@@ -1153,12 +1333,17 @@ impl App {
             (" [k]          poke ASER (head right)", Color::White, false),
             (" [u]          poke AWAL (olfaction L)", Color::White, false),
             (" [o]          poke AWAR (olfaction R)", Color::White, false),
-            (" [p]          toggle auto-stimulation", Color::White, false),
+             (" [p]          toggle auto-stimulation", Color::White, false),
+             (" [e]          add obstacle", Color::White, false),
+             ("", Color::White, false),
+             (" Record ", Color::Green, true),
+             (" [r]          record/stop", Color::White, false),
+             (" [,] [.]      prev/next frame", Color::White, false),
             ("", Color::White, false),
             (" [q]          quit", Color::White, false),
             ("", Color::White, false),
-            (" 307 neurons | 2847 edges", Color::DarkGray, false),
-            (" C. elegans hermaphrodite", Color::DarkGray, false),
+            (self.herm_label.as_str(), Color::DarkGray, false),
+            (&sex_display, Color::DarkGray, false),
         ];
         let lines: Vec<Line> = help_data.iter().map(|(text, color, bold)| {
             let mut style = Style::default().fg(*color);

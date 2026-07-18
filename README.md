@@ -5,12 +5,12 @@
 <p align="center">
   <img src="demo.gif" alt="BioSaka demo" width="480">
   <br>
-  <em>307 neurons, ~2800 synapses. all running in your terminal.</em>
+  <em>307/379 neurons, ~2800/3159 synapses. herm or male. all in your terminal.</em>
 </p>
 
 ## what
 
-BioSaka loads the actual C. elegans hermaphrodite connectome from White et al. 1986 and Cook et al. 2019, runs a leaky integrate-and-fire neural simulation, and draws it in your terminal. Watch 307 neurons spike in real time. Watch the worm crawl. Watch the brain light up.
+BioSaka loads the actual C. elegans connectome from White et al. 1986 and Cook et al. 2019 — **both sexes**. Run the hermaphrodite (307 neurons, 2847 edges) or the male (379 neurons, 3159 edges) with a CLI flag. Leaky integrate-and-fire neural simulation, drawn in your terminal. Watch neurons spike in real time. Watch the worm crawl. Watch the brain light up.
 
 no GUI. no bloat. just a worm in a box.
 
@@ -45,7 +45,7 @@ needs a terminal that likes crossterm. if your terminal cant handle escape codes
 ## controls
 
 | key | what it does |
-|---|---|
+|---|---|---|
 | `1` `2` `3` | graph / worm / stats |
 | `c` | credits |
 | `i` | technical info (scroll with up/down) |
@@ -54,22 +54,35 @@ needs a terminal that likes crossterm. if your terminal cant handle escape codes
 | arrows | pan (graph tab) or scroll (info tab) |
 | `q` | quit |
 
+## CLI
+
+```
+biosaka [--sex <hermaphrodite|male>]
+```
+
+- `--sex male` / `-s m` — load the male connectome (379n, 3159e)
+- `--sex hermaphrodite` / `-s h` — load the hermaphrodite connectome (307n, 2847e) [default]
+- `--help` — detailed help
+- `--version` — version info
+
 ## features
 
-- **real data** — 307 neurons, 2847 edges from published EM reconstructions. every synapse is real.
+- **dual-sex connectome** — hermaphrodite (307n, 2847e) or male (379n, 3159e) via `--sex male`
+- **real data** — both sexes from published EM reconstructions (White 1986, Cook 2019)
 - **spiking simulation** — LIF neurons with synaptic transmission and gap junction coupling
 - **5-tab TUI** — neural graph, worm view, statistics, credits, technical info
-- **live graph** — all 307 neurons in a circular layout, color coded by activity
-- **worm body** — 20-segment body with sinusoidal movement driven by motor neurons
-- **real-time stats** — network activity, spike counts, per-neuron firing rates
+- **live graph** — circular/force-directed layout, color coded by activity, male-specific neuron highlighting
+- **worm body** — 20-segment body with sinusoidal movement driven by motor neurons, tail fan (male) or vulva (herm) visuals
+- **real-time stats** — network activity, spike counts, per-neuron firing rates, sex comparison
 - **interactive** — pause, zoom, pan, switch views. no mouse required.
 
 ## how it works
 
 ```
                          ┌──────────────────────┐
-  data/connectome.csv ──>│      build.rs        │──> static edge list
-    (White 1986)         │  (compile time)      │    (307 neurons)
+  data/connectome.csv ──>│   build.rs + build/  │──> static edge lists
+    (White 1986)         │  (compile time)      │    herm: 307n / 2847e
+    (Cook 2019)          │                      │    male: 379n / 3159e
                          └──────────────────────┘
                                     │
                           ┌─────────▼───────────┐
@@ -109,7 +122,7 @@ the worm body is 20 segments. motor neurons (VB, DB, VA, DA) drive a sinusoidal 
 - `logo.txt` — ASCII art. opens the worm's DNA with a text editor.
 - `LICENSE` — research use only. dont sell the worm.
 - [aur/biosaka](aur/PKGBUILD) — arch linux package.
-- `src/` — 4 modules. 500 lines of rust. all of it handwritten.
+- `src/` — 6 modules + `build/`. all handwritten.
 
 ## license
 

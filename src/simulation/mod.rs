@@ -89,6 +89,8 @@ pub fn infer_neurotransmitter(name: &str) -> Neurotransmitter {
     // Dopaminergic
     if name.starts_with("CEP") || name == "ADE" || name.starts_with("ADE")
         || name == "PDE" || name.starts_with("PDE")
+        || name == "PDP"
+        || name.starts_with("CEM")
     {
         return Neurotransmitter::Dopamine;
     }
@@ -119,6 +121,16 @@ pub fn infer_neurotransmitter(name: &str) -> Neurotransmitter {
         return Neurotransmitter::Glutamate;
     }
 
+    // Ray sensory neurons (male-specific)
+    if name.starts_with("R1") || name.starts_with("R2")
+        || name.starts_with("R3") || name.starts_with("R4")
+        || name.starts_with("R5") || name.starts_with("R6")
+        || name.starts_with("R7") || name.starts_with("R8")
+        || name.starts_with("R9")
+    {
+        return Neurotransmitter::Glutamate;
+    }
+
     // Cholinergic — most motor neurons + remainder of interneurons
     if name.starts_with("VA") || name.starts_with("VB")
         || name.starts_with("VC") || name.starts_with("DA")
@@ -129,6 +141,8 @@ pub fn infer_neurotransmitter(name: &str) -> Neurotransmitter {
         || name.starts_with("SIA") || name.starts_with("SIB")
         || name.starts_with("PV")
         || name.starts_with("RM")
+        || name.starts_with("CA") || name.starts_with("SP")
+        || name.starts_with("PCA") || name.starts_with("PCB")
     {
         return Neurotransmitter::Acetylcholine;
     }
@@ -318,7 +332,15 @@ impl Simulation {
     pub fn stimulate_sensory_neurons(&mut self, strength: f32) {
         for i in 0..self.neurons.len() {
             let name = &self.neurons[i].name;
-            if name.starts_with("AS") || name.starts_with("AD") {
+            if name.starts_with("AS") || name.starts_with("AD")
+                || name.starts_with("CEM")
+                || name.starts_with("SA")
+                || name.starts_with("R1") || name.starts_with("R2")
+                || name.starts_with("R3") || name.starts_with("R4")
+                || name.starts_with("R5") || name.starts_with("R6")
+                || name.starts_with("R7") || name.starts_with("R8")
+                || name.starts_with("R9")
+            {
                 self.sensor_inputs[i] += strength;
             }
         }

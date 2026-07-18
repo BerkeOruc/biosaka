@@ -1,21 +1,25 @@
+use crate::generated::{self, Sex};
+
+#[derive(Clone)]
 pub struct Connectome {
     pub num_neurons: u16,
     pub neuron_names: Vec<String>,
     pub chemical_edges: Vec<(u16, u16, u16)>,
     pub gap_junction_edges: Vec<(u16, u16, u16)>,
+    pub sex: Sex,
 }
 
 impl Connectome {
-    pub fn load() -> Self {
-        let num_neurons = crate::generated::NUM_NEURONS;
+    pub fn load(sex: Sex) -> Self {
+        let num_neurons = generated::num_neurons(&sex);
         let neuron_names: Vec<String> = (0..num_neurons)
-            .map(|i| crate::generated::NEURON_NAMES[i as usize].to_string())
+            .map(|i| generated::neuron_names(&sex)[i as usize].to_string())
             .collect();
 
         let mut chemical_edges = Vec::new();
         let mut gap_junction_edges = Vec::new();
 
-        for &(pre, post, conn_type, weight) in crate::generated::EDGES {
+        for &(pre, post, conn_type, weight) in generated::edges(&sex) {
             match conn_type {
                 0 => chemical_edges.push((pre, post, weight)),
                 1 => gap_junction_edges.push((pre, post, weight)),
@@ -24,10 +28,11 @@ impl Connectome {
         }
 
         Connectome {
-            num_neurons: crate::generated::NUM_NEURONS,
+            num_neurons,
             neuron_names,
             chemical_edges,
             gap_junction_edges,
+            sex,
         }
     }
 
@@ -58,5 +63,12 @@ impl Connectome {
 
     pub fn get_gap_junction_edges(&self) -> &[(u16, u16, u16)] {
         &self.gap_junction_edges
+    }
+
+    pub fn sex_label(&self) -> &'static str {
+        match self.sex {
+            Sex::Hermaphrodite => "Hermaphrodite",
+            Sex::Male => "Male",
+        }
     }
 }
