@@ -1,5 +1,6 @@
 use crate::simulation::Simulation;
 use rand::Rng;
+use std::f32::consts::{PI, TAU};
 
 const NUM_SEGMENTS: usize = 20;
 const SPRING_K: f32 = 600.0;
@@ -42,7 +43,6 @@ pub struct Worm {
     pub obstacles: Vec<Obstacle>,
     pub obstacle_count: u32,
     pub sex: String,
-    rng_state: u32,
 }
 
 impl Worm {
@@ -57,7 +57,7 @@ impl Worm {
                     y: head_y,
                     vx: 0.0,
                     vy: 0.0,
-                    angle: 3.14159,
+                    angle: PI,
                     mass: 1.0,
                 }
             })
@@ -75,24 +75,22 @@ impl Worm {
             segments,
             head_x,
             head_y,
-            direction: 3.14159,
+            direction: PI,
             speed: 0.0,
             body_wave_phase: 0.0,
             obstacles: Vec::new(),
             obstacle_count: 0,
             sex: String::from("Hermaphrodite"),
-            rng_state: 42,
         }
     }
 
     pub fn add_random_obstacle(&mut self) {
-        self.rng_state = self.rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
         let mut rng = rand::thread_rng();
-        let w = 0.04 + (self.rng_state % 8) as f32 * 0.01;
-        let h = 0.04 + (self.rng_state.wrapping_mul(3) % 8) as f32 * 0.01;
+        let w = 0.04 + rng.gen_range(0..8) as f32 * 0.01;
+        let h = 0.04 + rng.gen_range(0..8) as f32 * 0.01;
         let cx = self.body_center_x();
         let cy = self.body_center_y();
-        let angle = rng.gen::<f32>() * 6.2832;
+        let angle = rng.gen::<f32>() * TAU;
         let dist = 0.08 + rng.gen::<f32>() * 0.12;
         let x = (cx + angle.cos() * dist - w * 0.5).clamp(0.02, 0.98 - w);
         let y = (cy + angle.sin() * dist - h * 0.5).clamp(0.02, 0.98 - h);
@@ -111,8 +109,8 @@ impl Worm {
             self.body_wave_phase -= 628.3;
         }
 
-        let mut fx = vec![0.0f32; NUM_SEGMENTS];
-        let mut fy = vec![0.0f32; NUM_SEGMENTS];
+        let mut fx = [0.0f32; NUM_SEGMENTS];
+        let mut fy = [0.0f32; NUM_SEGMENTS];
 
         // Spring forces between adjacent segments
         for i in 0..NUM_SEGMENTS.saturating_sub(1) {
@@ -254,44 +252,25 @@ impl Worm {
         let mut right_cnt = 0u32;
 
         for neuron in &sim.neurons {
-            let name = &neuron.name;
             let rate = neuron.firing_rate;
-
-            if (name.starts_with("VB") || name == "AVBL" || name == "AVBR")
-                && (name.ends_with('L') || name.ends_with('R'))
-            {
-                if name.ends_with('L') {
-                    left_act += rate;
-                    left_cnt += 1;
-                } else {
-                    right_act += rate;
-                    right_cnt += 1;
+            match neuron.motor_role {
+                1 => { left_act += rate; left_cnt += 1; }      // VB/AVB-L
+                2 => { right_act += rate; right_cnt += 1; }     // VB/AVB-R
+                3 => { left_act += rate * 0.5; left_cnt += 1; } // DB-L
+                4 => { right_act += rate * 0.5; right_cnt += 1; } // DB-R
+                5 => {                                            // VA/DA/VC bilateral
+                    left_act += rate * 0.3;
+                    right_act += rate * 0.3;
                 }
-            }
-
-            if name.starts_with("DB") && (name.ends_with('L') || name.ends_with('R')) {
-                if name.ends_with('L') {
+                6 => {                                            // CP bilateral
                     left_act += rate * 0.5;
-                    left_cnt += 1;
-                } else {
                     right_act += rate * 0.5;
-                    right_cnt += 1;
                 }
-            }
-
-            if name.starts_with("VA") || name.starts_with("DA") || name.starts_with("VC") {
-                left_act += rate * 0.3;
-                right_act += rate * 0.3;
-            }
-
-            if name.starts_with("CP") {
-                left_act += rate * 0.5;
-                right_act += rate * 0.5;
-            }
-
-            if name == "HOB" {
-                left_act += rate * 0.2;
-                right_act += rate * 0.2;
+                7 => {                                            // HOB bilateral
+                    left_act += rate * 0.2;
+                    right_act += rate * 0.2;
+                }
+                _ => {}
             }
         }
 

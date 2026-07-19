@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use crate::connectome::Connectome;
 use rand::Rng;
 
@@ -6,13 +5,21 @@ const RESET_POTENTIAL: f32 = 0.0;
 const GABA_WEIGHT: f32 = -0.20;
 const GAP_JUNCTION_STRENGTH: f32 = 0.05;
 
+/// Box-Muller transform: generate a standard normal N(0,1) sample from two uniform(0,1)
+fn gaussian_sample(rng: &mut impl Rng) -> f32 {
+    let u: f32 = rng.gen_range(1e-8..1.0);
+    let v: f32 = rng.gen_range(1e-8..1.0);
+    (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos()
+}
+
 /// Tunable simulation parameters — can be adjusted live via the parameter panel.
 #[derive(Debug, Clone, Copy)]
 pub struct SimParams {
-    pub leak_constant: f32,      // 0.90 – 0.99  (default 0.95)
-    pub threshold: f32,          // 0.5  – 2.0   (default 1.0)
-    pub noise_strength: f32,     // 0.0  – 0.1   (default 0.02)
+    pub leak_constant: f32,       // 0.90 – 0.99  (default 0.95)
+    pub threshold: f32,           // 0.5  – 2.0   (default 1.0)
+    pub noise_strength: f32,      // 0.0  – 0.1   (default 0.02)
     pub synaptic_multiplier: f32, // 0.5  – 3.0   (default 1.0)
+    pub refractory_period: f32,   // 0  – 20 ticks  (default 2.0)
 }
 
 impl Default for SimParams {
@@ -22,16 +29,19 @@ impl Default for SimParams {
             threshold: 1.0,
             noise_strength: 0.02,
             synaptic_multiplier: 1.0,
+            refractory_period: 2.0,
         }
     }
 }
 
 impl SimParams {
+    pub const COUNT: usize = 5;
+
     pub fn labels() -> &'static [&'static str] {
-        &["Leak", "Thresh", "Noise", "SynMul"]
+        &["Leak", "Thresh", "Noise", "SynMul", "Refrct"]
     }
 
-    pub fn count() -> usize { 4 }
+    pub fn count() -> usize { Self::COUNT }
 
     pub fn get(&self, idx: usize) -> f32 {
         match idx {
@@ -39,6 +49,7 @@ impl SimParams {
             1 => self.threshold,
             2 => self.noise_strength,
             3 => self.synaptic_multiplier,
+            4 => self.refractory_period,
             _ => 0.0,
         }
     }
@@ -49,6 +60,7 @@ impl SimParams {
             1 => self.threshold = val.clamp(0.5, 2.0),
             2 => self.noise_strength = val.clamp(0.0, 0.1),
             3 => self.synaptic_multiplier = val.clamp(0.5, 3.0),
+            4 => self.refractory_period = val.clamp(0.0, 20.0).round(),
             _ => {}
         }
     }
@@ -59,8 +71,13 @@ impl SimParams {
             1 => (0.5,  2.0,  0.1),
             2 => (0.0,  0.1,  0.005),
             3 => (0.5,  3.0,  0.1),
+            4 => (0.0, 20.0, 1.0),
             _ => (0.0, 0.0, 0.0),
         }
+    }
+
+    pub fn refractory_ticks(&self) -> u32 {
+        self.refractory_period as u32
     }
 }
 
@@ -73,7 +90,6 @@ pub enum Neurotransmitter {
     Acetylcholine, // excitatory — standard motor/inter-neuron transmitter
     Dopamine,    // modulatory (treated as weak excitatory for now)
     Serotonin,   // modulatory (treated as weak excitatory for now)
-    Other,       // unknown / default (mild excitatory)
 }
 
 /// Infer neurotransmitter type from a C. elegans neuron name.
@@ -87,9 +103,8 @@ pub fn infer_neurotransmitter(name: &str) -> Neurotransmitter {
     }
 
     // Dopaminergic
-    if name.starts_with("CEP") || name == "ADE" || name.starts_with("ADE")
-        || name == "PDE" || name.starts_with("PDE")
-        || name == "PDP"
+    if name.starts_with("CEP") || name.starts_with("ADE")
+        || name.starts_with("PDE") || name.starts_with("PDP")
         || name.starts_with("CEM")
     {
         return Neurotransmitter::Dopamine;
@@ -116,7 +131,7 @@ pub fn infer_neurotransmitter(name: &str) -> Neurotransmitter {
         || name.starts_with("SMB") || name.starts_with("SMD")
         || name.starts_with("RMD") || name.starts_with("RMG")
         || name.starts_with("SDQ")
-        || name == "URY" || name.starts_with("URY")
+        || name.starts_with("URY")
     {
         return Neurotransmitter::Glutamate;
     }
@@ -158,6 +173,8 @@ pub struct NeuronState {
     pub spike_count: u64,
     pub name: String,
     pub neurotransmitter: Neurotransmitter,
+    pub refractory_remaining: u32,
+    pub motor_role: u8,  // 0=none, 1=VB/AVB-L, 2=VB/AVB-R, 3=DB-L, 4=DB-R, 5=VA/DA/VC, 6=CP, 7=HOB
 }
 
 pub struct Simulation {
@@ -167,7 +184,10 @@ pub struct Simulation {
     pub total_spikes: u64,
     pub network_activity: f32,
     pub sensor_inputs: Vec<f32>,
+    pub stim_glow: Vec<u8>,
     pub params: SimParams,
+    rng: rand::rngs::ThreadRng,
+    potentials_buf: Vec<f32>,
 }
 
 impl Neurotransmitter {
@@ -178,18 +198,6 @@ impl Neurotransmitter {
             Neurotransmitter::Acetylcholine => "ACh",
             Neurotransmitter::Dopamine => "DA",
             Neurotransmitter::Serotonin => "5HT",
-            Neurotransmitter::Other => "?",
-        }
-    }
-
-    pub fn description(&self) -> &'static str {
-        match self {
-            Neurotransmitter::GABA => "inhibitory",
-            Neurotransmitter::Glutamate => "excitatory",
-            Neurotransmitter::Acetylcholine => "excitatory",
-            Neurotransmitter::Dopamine => "modulatory",
-            Neurotransmitter::Serotonin => "modulatory",
-            Neurotransmitter::Other => "unknown",
         }
     }
 
@@ -200,7 +208,6 @@ impl Neurotransmitter {
             Neurotransmitter::Acetylcholine => 2,  // cyan-ish
             Neurotransmitter::Dopamine => 3,       // yellow-ish
             Neurotransmitter::Serotonin => 4,      // magenta-ish
-            Neurotransmitter::Other => 5,          // gray
         }
     }
 }
@@ -212,6 +219,21 @@ impl Simulation {
             .map(|i| {
                 let name = connectome.neuron_name(i).to_string();
                 let nt = infer_neurotransmitter(&name);
+                let motor_role = if (name.starts_with("VB") || name == "AVBL" || name == "AVBR")
+                    && (name.ends_with('L') || name.ends_with('R'))
+                {
+                    if name.ends_with('L') { 1 } else { 2 }
+                } else if name.starts_with("DB") && (name.ends_with('L') || name.ends_with('R')) {
+                    if name.ends_with('L') { 3 } else { 4 }
+                } else if name.starts_with("VA") || name.starts_with("DA") || name.starts_with("VC") {
+                    5
+                } else if name.starts_with("CP") {
+                    6
+                } else if name == "HOB" {
+                    7
+                } else {
+                    0
+                };
                 NeuronState {
                     id: i,
                     potential: rng.gen::<f32>() * 0.3,
@@ -220,11 +242,14 @@ impl Simulation {
                     spike_count: 0,
                     name,
                     neurotransmitter: nt,
+                    refractory_remaining: 0,
+                    motor_role,
                 }
             })
             .collect();
 
-        let sensor_inputs = vec![0.0; connectome.num_neurons() as usize];
+        let n = connectome.num_neurons() as usize;
+        let sensor_inputs = vec![0.0; n];
 
         Simulation {
             neurons,
@@ -233,29 +258,34 @@ impl Simulation {
             total_spikes: 0,
             network_activity: 0.0,
             sensor_inputs,
+            stim_glow: vec![0; n],
             params: SimParams::default(),
+            rng,
+            potentials_buf: vec![0.0; n],
         }
     }
 
     pub fn step(&mut self) {
-        let mut rng = rand::thread_rng();
         let n = self.neurons.len();
         let p = &self.params;
-
-        let mut new_potentials = vec![0.0f32; n];
+        let buf = &mut self.potentials_buf;
 
         for i in 0..n {
             let mut v = self.neurons[i].potential;
 
-            v *= p.leak_constant;
-            v += p.noise_strength * (rng.gen::<f32>() - 0.5) * 2.0;
-
-            v += self.sensor_inputs[i];
+            if self.neurons[i].refractory_remaining > 0 {
+                self.neurons[i].refractory_remaining -= 1;
+                v = 0.0;
+            } else {
+                v *= p.leak_constant;
+                v += p.noise_strength * gaussian_sample(&mut self.rng);
+                v += self.sensor_inputs[i];
+            }
             self.sensor_inputs[i] = 0.0;
-
-            new_potentials[i] = v;
+            buf[i] = v;
         }
 
+        // Phase 2: chemical synapses (pre→post)
         let syn_w = p.synaptic_multiplier * 0.15;
         for &(pre, post, weight) in self.connectome.get_chemical_edges() {
             let pre = pre as usize;
@@ -266,32 +296,40 @@ impl Simulation {
                     Neurotransmitter::Dopamine | Neurotransmitter::Serotonin => syn_w * 0.5 * weight as f32,
                     _ => syn_w * weight as f32,
                 };
-                new_potentials[post] += w;
+                buf[post] += w;
             }
         }
 
+        // Phase 3: gap junctions (use pre-update potentials for consistency)
         for &(a, b, weight) in self.connectome.get_gap_junction_edges() {
             let a = a as usize;
             let b = b as usize;
             if a < n && b < n {
                 let diff = self.neurons[a].potential - self.neurons[b].potential;
                 let coupling = GAP_JUNCTION_STRENGTH * weight as f32 * diff;
-                new_potentials[a] -= coupling;
-                new_potentials[b] += coupling;
+                buf[a] -= coupling;
+                buf[b] += coupling;
             }
         }
 
+        // Decay stimulation glow
+        for g in &mut self.stim_glow {
+            *g = g.saturating_sub(1);
+        }
+
+        // Phase 4: threshold, firing, rate update
         let threshold = p.threshold;
         let mut active_count = 0;
         for i in 0..n {
-            if new_potentials[i] >= threshold {
+            if buf[i] >= threshold {
                 self.neurons[i].potential = RESET_POTENTIAL;
                 self.neurons[i].firing = true;
                 self.neurons[i].spike_count += 1;
                 self.total_spikes += 1;
+                self.neurons[i].refractory_remaining = p.refractory_ticks();
                 active_count += 1;
             } else {
-                self.neurons[i].potential = new_potentials[i];
+                self.neurons[i].potential = buf[i];
                 self.neurons[i].firing = false;
             }
 
@@ -313,16 +351,23 @@ impl Simulation {
     }
 
     pub fn get_top_firing(&self, count: usize) -> Vec<(u16, f32)> {
-        let mut rates: Vec<(u16, f32)> = self
-            .neurons
-            .iter()
-            .map(|n| (n.id, n.firing_rate))
-            .collect();
-        rates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        rates.truncate(count);
-        rates
+        let mut top: Vec<(u16, f32)> = Vec::with_capacity(count + 1);
+        for n in &self.neurons {
+            let rate = n.firing_rate;
+            let insert_at = top.iter().position(|&(_, r)| rate > r);
+            if let Some(pos) = insert_at {
+                top.insert(pos, (n.id, rate));
+                if top.len() > count {
+                    top.pop();
+                }
+            } else if top.len() < count {
+                top.push((n.id, rate));
+            }
+        }
+        top
     }
 
+    #[allow(dead_code)]
     pub fn stimulate_neuron(&mut self, id: u16, strength: f32) {
         if (id as usize) < self.neurons.len() {
             self.sensor_inputs[id as usize] += strength;
@@ -342,28 +387,27 @@ impl Simulation {
                 || name.starts_with("R9")
             {
                 self.sensor_inputs[i] += strength;
+                self.stim_glow[i] = 8;
             }
         }
     }
 
     pub fn stimulate_by_name(&mut self, name: &str, strength: f32) -> bool {
-        for i in 0..self.neurons.len() {
-            if self.neurons[i].name == name {
-                self.sensor_inputs[i] += strength;
-                return true;
-            }
+        if let Some(id) = self.connectome.id_of(name) {
+            self.sensor_inputs[id as usize] += strength;
+            self.stim_glow[id as usize] = 10;
+            true
+        } else {
+            false
         }
-        false
     }
 
     pub fn stimulate_by_prefix(&mut self, prefix: &str, strength: f32) -> u32 {
-        let mut count = 0;
-        for i in 0..self.neurons.len() {
-            if self.neurons[i].name.starts_with(prefix) {
-                self.sensor_inputs[i] += strength;
-                count += 1;
-            }
+        let ids = self.connectome.find_by_prefix(prefix);
+        for &id in &ids {
+            self.sensor_inputs[id as usize] += strength;
+            self.stim_glow[id as usize] = 10;
         }
-        count
+        ids.len() as u32
     }
 }

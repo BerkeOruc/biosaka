@@ -4,6 +4,8 @@ use ratatui::style::{Color, Style, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph};
 use ratatui::Frame;
+use std::f32::consts::TAU;
+use std::time::Instant;
 
 use crate::connectome::Connectome;
 use crate::simulation::{Neurotransmitter, SimParams, Simulation};
@@ -188,6 +190,7 @@ pub struct App {
     pub use_force_layout: bool,
     cached_positions: Vec<(u16, u16)>,
     unit_positions: Vec<(f32, f32)>,
+    last_pos_area: (u16, u16),
     pub pending_stimuli: Vec<String>,
     pub stim_message: Option<String>,
     pub stim_message_ticks: u8,
@@ -196,7 +199,8 @@ pub struct App {
     pub hubness: Vec<u32>,
     pub neuron_groups: Vec<u8>,
     pub search_query: String,
-    pub search_results: Vec<usize>,
+    pub search_results: Vec<bool>,
+    pub search_match_count: usize,
     pub search_active: bool,
     pub param_panel_active: bool,
     pub param_selected: usize,
@@ -206,6 +210,10 @@ pub struct App {
     pub sex_label: String,
     pub herm_label: String,
     pub is_male_specific: Vec<bool>,
+    pub show_labels: bool,
+    pub frame_count: u64,
+    pub fps: u32,
+    last_fps_tick: Instant,
 }
 
 fn is_male_neuron(name: &str) -> bool {
@@ -221,7 +229,7 @@ fn is_male_neuron(name: &str) -> bool {
             return true;
         }
     }
-    if name.starts_with("SA") && !name.starts_with("SAA") && !name.starts_with("SAB") && !name.starts_with("SAS") {
+    if name.starts_with("SA") && !name.starts_with("SAA") && !name.starts_with("SAB") && !name.starts_with("SAD") && !name.starts_with("SAI") && !name.starts_with("SAS") {
         return true;
     }
     if (name.starts_with("VA") || name.starts_with("VB") || name.starts_with("DA")) && name.len() > 2 {
@@ -246,7 +254,7 @@ impl App {
         let unit_positions: Vec<(f32, f32)> = (0..n)
             .map(|i| {
                 let t = i as f32 / n.max(1) as f32;
-                let angle = t * 6.2832;
+                let angle = t * TAU;
                 let lobe = (angle * 2.0).cos();
                 let organic = (angle * 3.0 + 1.0).sin() * 0.015;
                 let r = 0.36 + lobe * 0.06 + organic;
@@ -298,6 +306,7 @@ impl App {
             use_force_layout: false,
             cached_positions: Vec::new(),
             unit_positions,
+            last_pos_area: (0, 0),
             pending_stimuli: Vec::new(),
             stim_message: None,
             stim_message_ticks: 0,
@@ -307,6 +316,7 @@ impl App {
             neuron_groups,
             search_query: String::new(),
             search_results: Vec::new(),
+            search_match_count: 0,
             search_active: false,
             param_panel_active: false,
             param_selected: 0,
@@ -316,19 +326,25 @@ impl App {
             sex_label: "Hermaphrodite".to_string(),
             herm_label: "307n | 2847e".to_string(),
             is_male_specific,
+            show_labels: false,
+            frame_count: 0,
+            fps: 0,
+            last_fps_tick: Instant::now(),
         }
     }
 
     fn compute_force_layout(&mut self, n: usize) {
         if n == 0 { return; }
-        // Simple deterministic LCG (no rand dependency)
-        let mut rng_state: u64 = 42;
-        let mut rand_f32 = || {
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((rng_state >> 33) as f32) / (1u64 << 31) as f32
-        };
+        // Initialise to a circle with lobe perturbation (better than random for force layout)
         let mut pos: Vec<(f32, f32)> = (0..n)
-            .map(|_| (0.15 + rand_f32() * 0.7, 0.15 + rand_f32() * 0.7))
+            .map(|i| {
+                let t = i as f32 / n.max(1) as f32;
+                let angle = t * TAU;
+                let lobe = (angle * 2.0).cos();
+                let organic = (angle * 3.0 + 1.0).sin() * 0.015;
+                let r = 0.32 + lobe * 0.04 + organic;
+                (0.5 + angle.cos() * r * 1.08, 0.5 + angle.sin() * r * 0.95)
+            })
             .collect();
         let area = 0.7 * 0.7;
         let k = (area / n as f32).sqrt();
@@ -375,14 +391,17 @@ impl App {
     }
 
     fn search_update(&mut self, connectome: &Connectome) {
+        let n = connectome.num_neurons() as usize;
         self.search_results.clear();
+        self.search_results.resize(n, false);
+        self.search_match_count = 0;
         if self.search_query.is_empty() { return; }
         let q = self.search_query.to_uppercase();
-        let n = connectome.num_neurons() as usize;
         for i in 0..n {
             let name = connectome.neuron_name(i as u16).to_uppercase();
             if name.contains(&q) {
-                self.search_results.push(i);
+                self.search_results[i] = true;
+                self.search_match_count += 1;
             }
         }
     }
@@ -399,6 +418,7 @@ impl App {
                             if key.code == KeyCode::Esc {
                                 self.search_query.clear();
                                 self.search_results.clear();
+                                self.search_match_count = 0;
                             }
                             self.search_active = false;
                         }
@@ -501,7 +521,7 @@ impl App {
                                 self.unit_positions = (0..n)
                                     .map(|i| {
                                         let t = i as f32 / n.max(1) as f32;
-                                        let angle = t * 6.2832;
+                                        let angle = t * TAU;
                                         let lobe = (angle * 2.0).cos();
                                         let organic = (angle * 3.0 + 1.0).sin() * 0.015;
                                         let r = 0.36 + lobe * 0.06 + organic;
@@ -512,6 +532,15 @@ impl App {
                             } else {
                                 self.compute_force_layout(self.unit_positions.len());
                             }
+                        }
+                        KeyCode::Char('l') | KeyCode::Char('L') => {
+                            self.show_labels = !self.show_labels;
+                            self.stim_message = if self.show_labels {
+                                Some("Labels ON ".to_string())
+                            } else {
+                                Some("Labels OFF".to_string())
+                            };
+                            self.stim_message_ticks = 15;
                         }
                         KeyCode::Char('j') => {
                             self.pending_stimuli.push("ASEL".to_string());
@@ -541,6 +570,38 @@ impl App {
                                 Some("Auto-stim OFF".to_string())
                             };
                             self.stim_message_ticks = 30;
+                        }
+                        KeyCode::Char('g') => {
+                            let count = sim.stimulate_by_prefix("CEM", 0.5);
+                            self.stim_message = if count > 0 {
+                                Some(format!("Stim: CEM* {}n ", count))
+                            } else {
+                                Some("No CEM neurons ".to_string())
+                            };
+                            self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char('v') => {
+                            let count = sim.stimulate_by_prefix("SA", 0.4);
+                            self.stim_message = Some(format!("Stim: SA* {}n ", count));
+                            self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char('x') => {
+                            let count = sim.stimulate_by_prefix("SP", 0.5);
+                            self.stim_message = if count > 0 {
+                                Some(format!("Stim: SP* {}n ", count))
+                            } else {
+                                Some("No SP neurons ".to_string())
+                            };
+                            self.stim_message_ticks = 15;
+                        }
+                        KeyCode::Char('n') => {
+                            let count = sim.stimulate_by_prefix("R", 0.5);
+                            self.stim_message = if count > 0 {
+                                Some(format!("Stim: R* {}n ", count))
+                            } else {
+                                Some("No R* neurons ".to_string())
+                            };
+                            self.stim_message_ticks = 15;
                         }
                         KeyCode::Char('e') => {
                             worm.add_random_obstacle();
@@ -606,6 +667,13 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, sim: &Simulation, worm: &Worm) {
+        self.frame_count += 1;
+        let elapsed = self.last_fps_tick.elapsed();
+        if elapsed >= std::time::Duration::from_secs(1) {
+            self.fps = (self.frame_count as f64 / elapsed.as_secs_f64()) as u32;
+            self.frame_count = 0;
+            self.last_fps_tick = Instant::now();
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
@@ -618,7 +686,7 @@ impl App {
         }
         self.draw_header(frame, chunks[0], sim);
         self.draw_main(frame, chunks[1], sim, worm);
-        self.draw_footer(frame, chunks[2]);
+        self.draw_footer(frame, chunks[2], sim);
         if self.show_help {
             self.draw_help_overlay(frame, frame.area());
         }
@@ -639,7 +707,7 @@ impl App {
         let s = time_secs % 60;
 
         let title = Paragraph::new(Line::from(Span::styled(
-            " BioSaka v0.1.4 - C. elegans ",
+            " BioSaka v0.2.0 - C. elegans ",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )))
         .block(Block::default().borders(Borders::ALL));
@@ -673,13 +741,13 @@ impl App {
                 Span::raw(" [SPC]pause ")
             },
             Span::raw("[q]quit [c]redits [i]nfo "),
-            if !self.search_results.is_empty() {
+            if self.search_match_count > 0 {
                 Span::styled(
-                    format!("[{}] ", self.search_results.len()),
+                    format!("[{}] ", self.search_match_count),
                     Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
                 )
             } else if let Some(ref msg) = self.stim_message {
-                Span::styled(msg.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                Span::styled(msg.as_str(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             } else {
                 Span::raw("")
             },
@@ -727,11 +795,15 @@ impl App {
         let n = sim.neurons.len();
         let aspect = ch / cw;
 
-        let positions: Vec<(u16, u16)> = if self.cached_positions.len() == n {
-            self.cached_positions.clone()
-        } else {
+        // Invalidate cached positions on terminal resize
+        if self.last_pos_area != (cw as u16, ch as u16) {
+            self.cached_positions.clear();
+            self.last_pos_area = (cw as u16, ch as u16);
+        }
+
+        if self.cached_positions.len() != n {
             if self.use_force_layout && self.unit_positions.len() == n {
-                (0..n).map(|i| {
+                self.cached_positions = (0..n).map(|i| {
                     let (ux, uy) = self.unit_positions[i];
                     let uy_adj = 0.5 + (uy - 0.5) * aspect;
                     let xa = (ux + self.graph_offset_x * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
@@ -741,7 +813,7 @@ impl App {
                     (px, py)
                 }).collect()
             } else {
-                (0..n).map(|i| {
+                self.cached_positions = (0..n).map(|i| {
                     let (ux, uy) = self.unit_positions[i];
                     let y_with_aspect = 0.5 + (uy - 0.5) * aspect;
                     let xa = (ux + self.graph_offset_x * 0.005) * self.zoom_level + (1.0 - self.zoom_level) * 0.5;
@@ -751,8 +823,8 @@ impl App {
                     (px, py)
                 }).collect()
             }
-        };
-        self.cached_positions = positions.clone();
+        }
+        let positions = &self.cached_positions;
 
         let firing_at = |i: usize| -> bool {
             if let Some(f) = self.playback_frame {
@@ -761,7 +833,8 @@ impl App {
                 sim.neurons.get(i).map_or(false, |n| n.firing)
             }
         };
-        let step = (self.connectome_edges.len() / 1500).max(1);
+        let target_edges = (2000.0 * self.zoom_level) as usize;
+        let step = (self.connectome_edges.len() / target_edges.max(1)).max(1);
         for idx in (0..self.connectome_edges.len()).step_by(step) {
             let (pre, post, _, etype) = self.connectome_edges[idx];
             if let (Some(&(x1, y1)), Some(&(x2, y2))) = (positions.get(pre as usize), positions.get(post as usize)) {
@@ -773,10 +846,11 @@ impl App {
         }
 
         
-        let has_search = !self.search_results.is_empty();
+        let has_search = self.search_active && !self.search_query.is_empty();
+        let stim_glow_n = sim.stim_glow.len();
         for (i, &(px, py)) in positions.iter().enumerate() {
             if px >= inner.x + 1 && px < inner.x + inner.width - 1 && py >= inner.y + 1 && py < inner.y + inner.height - 1 {
-                if has_search && !self.search_results.contains(&i) { continue; }
+                if has_search && !self.search_results[i] { continue; }
                 let is_hub = self.hubness.get(i).copied().unwrap_or(0) > 20;
                 let (firing, rate) = if let Some(f) = self.playback_frame {
                     let fb = self.record_buffer.get(f).and_then(|b| b.get(i).copied()).unwrap_or(0) != 0;
@@ -785,10 +859,14 @@ impl App {
                     (sim.neurons[i].firing, sim.neurons[i].firing_rate)
                 };
 
+                let stimulated = !firing && i < stim_glow_n && sim.stim_glow[i] > 0;
+
                 let (color, bold) = if has_search {
                     (Color::Magenta, true)
                 } else if firing {
                     (Color::Yellow, true)
+                } else if stimulated {
+                    (Color::LightMagenta, true)
                 } else if rate > 0.08 {
                     (Color::LightGreen, true)
                 } else if rate > 0.04 {
@@ -820,21 +898,49 @@ impl App {
                 } else {
                     buf[(px, py)].set_fg(color);
                 }
+
+                if self.show_labels {
+                    let name = &sim.neurons[i].name;
+                    let label_x = px.saturating_add(1);
+                    let label_y = py;
+                    if label_x < inner.x + inner.width - 1 {
+                        for (j, ch) in name.chars().enumerate().take(6) {
+                            let cx = label_x + j as u16;
+                            if cx < inner.x + inner.width - 1 {
+                                buf[(cx, label_y)].set_char(ch);
+                                buf[(cx, label_y)].set_style(Style::default().fg(color));
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        let mut active: Vec<(usize, f32)> = (0..positions.len())
-            .map(|i| {
-                let r = if let Some(f) = self.playback_frame {
-                    let fb = self.record_buffer.get(f).and_then(|b| b.get(i).copied()).unwrap_or(0) != 0;
-                    if fb { 0.1 } else { 0.0 }
-                } else {
-                    sim.neurons[i].firing_rate
-                };
-                (i, r)
-            }).collect();
-        active.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        for &(i, rate) in active.iter().take(8) {
+        let mut active: Vec<(usize, f32)> = Vec::with_capacity(9);
+        let playback_rate = self.playback_frame.map(|f| {
+            let tmp: Vec<bool> = (0..positions.len())
+                .map(|i| self.record_buffer.get(f).and_then(|b| b.get(i).copied()).unwrap_or(0) != 0)
+                .collect();
+            tmp
+        });
+        for (i, _pos) in positions.iter().enumerate() {
+            let r = if let Some(ref fb) = playback_rate {
+                if fb[i] { 0.1 } else { 0.0 }
+            } else {
+                sim.neurons[i].firing_rate
+            };
+            if r < 0.02 { continue; }
+            let insert_at = active.iter().position(|&(_, rr)| r > rr);
+            if let Some(pos) = insert_at {
+                active.insert(pos, (i, r));
+                if active.len() > 8 {
+                    active.pop();
+                }
+            } else if active.len() < 8 {
+                active.push((i, r));
+            }
+        }
+        for &(i, rate) in &active {
             if rate < 0.02 { break; }
             let (px, py) = positions[i];
             if py >= inner.y + 1 && py < inner.y + inner.height - 1 {
@@ -851,7 +957,7 @@ impl App {
                 let full_label = format!("{} [{}]", name, nt_label);
                 let x0 = px + 2;
                 let label_len = full_label.len() as u16;
-                if x0 + label_len < inner.x + inner.width {
+                if x0 + label_len <= inner.x + inner.width {
                     for (ci, c) in full_label.chars().enumerate() {
                         let cell = &mut buf[(x0 + ci as u16, py)];
                         cell.set_char(c);
@@ -883,9 +989,28 @@ impl App {
 
         let is_male = self.sex_label == "Male";
         let tail_start = worm.segments.len().saturating_sub(3);
-        for (i, seg) in worm.segments.iter().enumerate() {
+
+        let seg_px: Vec<(u16, u16)> = worm.segments.iter().map(|seg| {
             let px = ((seg.x - cx + 0.5) * cw * 0.8 + cw * 0.1) as u16 + inner.x;
             let py = ((seg.y - cy + 0.5) * ch * 0.8 + ch * 0.1) as u16 + inner.y;
+            (px, py)
+        }).collect();
+
+        for i in 1..worm.segments.len() {
+            let (x1, y1) = seg_px[i - 1];
+            let (x2, y2) = seg_px[i];
+            let frac = i as f32 / worm.segments.len().max(1) as f32;
+            let line_color = if i == 1 { Color::LightRed }
+                else if is_male && i >= tail_start { Color::Green }
+                else if frac < 0.15 { Color::LightRed }
+                else if frac < 0.40 { Color::Red }
+                else if frac < 0.70 { Color::White }
+                else { Color::DarkGray };
+            draw_body_line(buf, x1, y1, x2, y2, line_color);
+        }
+
+        for (i, _seg) in worm.segments.iter().enumerate() {
+            let (px, py) = seg_px[i];
             if px < inner.x + inner.width && py < inner.y + inner.height && px > inner.x && py > inner.y {
                 let frac = i as f32 / worm.segments.len().max(1) as f32;
                 let (ch, color) = if i == 0 {
@@ -918,10 +1043,6 @@ impl App {
         }
 
         // Obstacles
-        let cw = inner.width.max(1) as f32;
-        let ch = inner.height.max(1) as f32;
-        let cx = worm.body_center_x();
-        let cy = worm.body_center_y();
         for ob in &worm.obstacles {
             let x1 = ((ob.x - cx + 0.5) * cw * 0.8 + cw * 0.1) as u16 + inner.x;
             let y1 = ((ob.y - cy + 0.5) * ch * 0.8 + ch * 0.1) as u16 + inner.y;
@@ -983,7 +1104,7 @@ impl App {
         ])));
         list_items.push(ListItem::new(Line::from(vec![
             Span::styled("Sex ", Style::default().fg(Color::Cyan)),
-            Span::styled(self.sex_label.clone(), Style::default().fg(Color::LightGreen)),
+            Span::styled(self.sex_label.as_str(), Style::default().fg(Color::LightGreen)),
         ])));
 
         let legend = List::new(list_items).block(Block::default().borders(Borders::ALL).title(" Motor "));
@@ -1008,7 +1129,6 @@ impl App {
             ]))
         }).collect();
 
-        let total_active = sim.neurons.iter().filter(|n| n.firing).count();
         let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Top Firing "));
         frame.render_widget(list, chunks[0]);
 
@@ -1038,9 +1158,30 @@ impl App {
         let mut sensory_rate = 0.0f32;
         let mut motor_rate = 0.0f32;
         let mut inter_rate = 0.0f32;
+        let mut low = 0u32; let mut med = 0u32; let mut high = 0u32;
+        let mut gaba_count = 0u32;
+        let mut glu_count = 0u32;
+        let mut ach_count = 0u32;
+        let mut hubs: Vec<(u16, u32)> = Vec::with_capacity(sim.neurons.len());
 
-        for n in &sim.neurons {
+        for (i, n) in sim.neurons.iter().enumerate() {
             let rate = n.firing_rate;
+
+            if rate <= 0.02 { low += 1; }
+            else if rate <= 0.08 { med += 1; }
+            else { high += 1; }
+
+            match n.neurotransmitter {
+                Neurotransmitter::GABA => gaba_count += 1,
+                Neurotransmitter::Glutamate => glu_count += 1,
+                Neurotransmitter::Acetylcholine => ach_count += 1,
+                _ => {}
+            }
+
+            if let Some(&h) = self.hubness.get(i) {
+                hubs.push((n.id, h));
+            }
+
             let is_sensory = n.name.starts_with("AS")
                 || n.name.starts_with("AD")
                 || n.name.starts_with("FLP")
@@ -1074,6 +1215,7 @@ impl App {
                 inter_rate += rate;
             }
         }
+        hubs.sort_by(|a, b| b.1.cmp(&a.1));
         let sensory_avg = sensory_rate / sensory_count.max(1) as f32;
         let motor_avg = motor_rate / motor_count.max(1) as f32;
         let inter_avg = inter_rate / inter_count.max(1) as f32;
@@ -1109,34 +1251,12 @@ impl App {
         .block(Block::default().borders(Borders::ALL).title(" Groups "));
         frame.render_widget(group_info, rc[2]);
 
+        let total_active = sensory_active + motor_active + inter_active;
         let sync_idx = (total_active as f32 / sim.neurons.len() as f32).powi(2);
-        let mut low = 0u32; let mut med = 0u32; let mut high = 0u32;
-        for n in &sim.neurons {
-            if n.firing_rate <= 0.02 { low += 1; }
-            else if n.firing_rate <= 0.08 { med += 1; }
-            else { high += 1; }
-        }
-
-        let mut gaba_count = 0u32;
-        let mut glu_count = 0u32;
-        let mut ach_count = 0u32;
-        for n in &sim.neurons {
-            match n.neurotransmitter {
-                Neurotransmitter::GABA => gaba_count += 1,
-                Neurotransmitter::Glutamate => glu_count += 1,
-                Neurotransmitter::Acetylcholine => ach_count += 1,
-                _ => {}
-            }
-        }
-
-        let mut hubs: Vec<(u16, u32)> = (0..sim.neurons.len() as u16)
-            .map(|i| (i, self.hubness.get(i as usize).copied().unwrap_or(0)))
-            .collect();
-        hubs.sort_by(|a, b| b.1.cmp(&a.1));
         let mut hub_lines: Vec<Line> = hubs.iter().take(5).map(|&(id, cnt)| {
             Line::from(vec![
                 Span::styled("  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(sim.neurons[id as usize].name.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(&sim.neurons[id as usize].name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Span::styled(format!(" ({})", cnt), Style::default().fg(Color::DarkGray)),
             ])
         }).collect();
@@ -1242,7 +1362,14 @@ impl App {
         frame.render_widget(para, inner);
     }
 
-    fn draw_footer(&self, frame: &mut Frame, area: Rect) {
+    fn draw_footer(&self, frame: &mut Frame, area: Rect, sim: &Simulation) {
+        let stim_label = if self.auto_stim_enabled {
+            " \u{25B6}Auto"
+        } else {
+            " \u{23F8}Auto"
+        };
+        let stim_color = if self.auto_stim_enabled { Color::Green } else { Color::DarkGray };
+        let tick_label = format!(" {:>6.0}t ", sim.time);
         let tabs = [
             " [1]Graph ",
             " [2]Worm ",
@@ -1252,13 +1379,17 @@ impl App {
             " [H]elp ",
             " [j]stim ",
         ];
-        let spans: Vec<Span> = tabs.iter().enumerate().map(|(i, name)| {
+        let mut spans: Vec<Span> = tabs.iter().enumerate().map(|(i, name)| {
             if i == self.selected_tab {
                 Span::styled(*name, Style::default().fg(Color::Black).bg(Color::Cyan))
             } else {
                 Span::styled(*name, Style::default().fg(Color::White))
             }
         }).collect();
+        spans.push(Span::styled(stim_label, Style::default().fg(stim_color)));
+        let fps_label = format!(" {:>3}fps ", self.fps);
+        spans.push(Span::styled(fps_label, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::raw(tick_label));
         frame.render_widget(Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL)), area);
     }
 
@@ -1307,13 +1438,13 @@ impl App {
 
     fn draw_help_overlay(&self, frame: &mut Frame, area: Rect) {
         let help_w = 44.min(area.width.saturating_sub(4));
-        let help_h = 20.min(area.height.saturating_sub(4));
+        let help_h = 25.min(area.height.saturating_sub(4));
         let x = (area.width - help_w) / 2;
         let y = (area.height - help_h) / 2;
         let overlay = Rect { x, y, width: help_w, height: help_h };
         frame.render_widget(Clear, overlay);
         let sex_display = format!("C. elegans {}", self.sex_label.to_lowercase());
-        let help_data: [(&str, Color, bool); 30] = [
+        let help_data: [(&str, Color, bool); 34] = [
             (" Controls ", Color::Cyan, true),
             ("", Color::White, false),
             (" [1] [2] [3]  switch tabs", Color::White, false),
@@ -1327,15 +1458,19 @@ impl App {
              (" [t]          parameter tuning panel", Color::White, false),
              (" []/[]        speed up/down", Color::White, false),
             (" [/]          search neuron", Color::White, false),
-            ("", Color::White, false),
+            (" [l]          toggle labels", Color::White, false),
             (" Stimulation ", Color::Green, true),
-            (" [j]          poke ASEL (head left)", Color::White, false),
-            (" [k]          poke ASER (head right)", Color::White, false),
-            (" [u]          poke AWAL (olfaction L)", Color::White, false),
-            (" [o]          poke AWAR (olfaction R)", Color::White, false),
-             (" [p]          toggle auto-stimulation", Color::White, false),
-             (" [e]          add obstacle", Color::White, false),
-             ("", Color::White, false),
+             (" [j]          poke ASEL (head left)", Color::White, false),
+             (" [k]          poke ASER (head right)", Color::White, false),
+             (" [u]          poke AWAL (olfaction L)", Color::White, false),
+             (" [o]          poke AWAR (olfaction R)", Color::White, false),
+              (" [g]          poke CEM* (male head)", Color::White, false),
+              (" [v]          poke SA* (sensory assoc)", Color::White, false),
+              (" [n]          poke R* (male rays)", Color::White, false),
+              (" [x]          poke SP* (male spicules)", Color::White, false),
+              (" [p]          toggle auto-stimulation", Color::White, false),
+              (" [e]          add obstacle", Color::White, false),
+              ("", Color::White, false),
              (" Record ", Color::Green, true),
              (" [r]          record/stop", Color::White, false),
              (" [,] [.]      prev/next frame", Color::White, false),
@@ -1354,6 +1489,28 @@ impl App {
             .block(Block::default().borders(Borders::ALL).title(" Help "))
             .style(Style::default().fg(Color::White).bg(Color::Black));
         frame.render_widget(para, overlay);
+    }
+}
+
+fn draw_body_line(buf: &mut ratatui::buffer::Buffer, x1: u16, y1: u16, x2: u16, y2: u16, color: Color) {
+    let bw = buf.area.width as i32;
+    let bh = buf.area.height as i32;
+    let mut x = x1 as i32;
+    let mut y = y1 as i32;
+    let dx = (x2 as i32 - x1 as i32).abs();
+    let dy = -(y2 as i32 - y1 as i32).abs();
+    let sx = if x1 < x2 { 1 } else { -1 };
+    let sy = if y1 < y2 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x >= 0 && y >= 0 && x < bw && y < bh {
+            buf[(x as u16, y as u16)].set_char('\u{2588}');
+            buf[(x as u16, y as u16)].set_fg(color);
+        }
+        if x == x2 as i32 && y == y2 as i32 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x += sx; }
+        if e2 <= dx { err += dx; y += sy; }
     }
 }
 

@@ -21,13 +21,6 @@ pub fn num_neurons(sex: &Sex) -> u16 {
     }
 }
 
-pub fn num_edges(sex: &Sex) -> usize {
-    match sex {
-        Sex::Hermaphrodite => HERM_EDGES,
-        Sex::Male => MALE_EDGES,
-    }
-}
-
 pub fn edges(sex: &Sex) -> &'static [(u16, u16, u8, u16)] {
     match sex {
         Sex::Hermaphrodite => HERM_SYNAPSES,

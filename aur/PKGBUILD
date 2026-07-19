@@ -4,7 +4,7 @@
 # AUR: biosaka
 
 pkgname=biosaka
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="C. elegans dual-sex neural simulation — herm 307n/2847e, male 379n/3159e, LIF spiking, ratatui TUI"
 arch=('x86_64')
