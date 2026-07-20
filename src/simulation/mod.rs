@@ -118,16 +118,15 @@ pub fn infer_neurotransmitter(name: &str) -> Neurotransmitter {
 
     // Glutamatergic — most sensory neurons + many interneurons
     if name.starts_with("AS")   // ASE, ASH, ASI, ASJ, ASK, ASG, etc.
-        || name.starts_with("AD") || name.starts_with("ADL")
-        || name.starts_with("AW") || name.starts_with("AWA")
-        || name.starts_with("AWB") || name.starts_with("AWC")
+        || name.starts_with("AD")
+        || name.starts_with("AW")   // covers AWA, AWB, AWC
         || name.starts_with("FLP") || name.starts_with("IL")
         || name.starts_with("OL") || name.starts_with("CEP")
         || name.starts_with("AIY") || name.starts_with("AIZ")
         || name.starts_with("RIA") || name.starts_with("RIB")
         || name.starts_with("RIC") || name.starts_with("RIG")
         || name.starts_with("RIH")
-        || name.starts_with("SA") || name.starts_with("SAA")
+        || name.starts_with("SA")   // covers SAA, SAB, SAD, SAI, SAS etc.
         || name.starts_with("SMB") || name.starts_with("SMD")
         || name.starts_with("RMD") || name.starts_with("RMG")
         || name.starts_with("SDQ")

@@ -4,12 +4,13 @@ use ratatui::style::{Color, Style, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph};
 use ratatui::Frame;
+use std::collections::VecDeque;
 use std::f32::consts::TAU;
 use std::time::Instant;
 
 use crate::connectome::Connectome;
 use crate::simulation::{Neurotransmitter, SimParams, Simulation};
-use crate::worm::Worm;
+use crate::worm::{Worm, VULVA_SEGMENT};
 
 const CREDIT_LINES: &[&str] = &[
     "",
@@ -204,7 +205,7 @@ pub struct App {
     pub search_active: bool,
     pub param_panel_active: bool,
     pub param_selected: usize,
-    pub record_buffer: Vec<Vec<u8>>,
+    pub record_buffer: VecDeque<Vec<u8>>,
     pub is_recording: bool,
     pub playback_frame: Option<usize>,
     pub sex_label: String,
@@ -320,7 +321,7 @@ impl App {
             search_active: false,
             param_panel_active: false,
             param_selected: 0,
-            record_buffer: Vec::new(),
+            record_buffer: VecDeque::new(),
             is_recording: false,
             playback_frame: None,
             sex_label: "Hermaphrodite".to_string(),
@@ -639,9 +640,10 @@ impl App {
                             if !self.record_buffer.is_empty() {
                                 self.paused = true;
                                 let idx = self.playback_frame.unwrap_or(self.record_buffer.len().saturating_sub(1));
-                                self.playback_frame = Some(idx.saturating_sub(1));
+                                let new_idx = idx.saturating_sub(1);
+                                self.playback_frame = Some(new_idx);
                                 self.stim_message = Some(format!("Frame {}/{} ",
-                                    self.playback_frame.unwrap(),
+                                    new_idx,
                                     self.record_buffer.len().saturating_sub(1)));
                                 self.stim_message_ticks = 30;
                             }
@@ -1031,7 +1033,7 @@ impl App {
             }
         }
         if !is_male {
-            let vulva_idx = 10.min(worm.segments.len().saturating_sub(1));
+                        let vulva_idx = VULVA_SEGMENT.min(worm.segments.len().saturating_sub(1));
             if let Some(seg) = worm.segments.get(vulva_idx) {
                 let px = ((seg.x - cx + 0.5) * cw * 0.8 + cw * 0.1) as u16 + inner.x;
                 let py = ((seg.y - cy + 0.5) * ch * 0.8 + ch * 0.1) as u16 + inner.y;
@@ -1162,7 +1164,7 @@ impl App {
         let mut gaba_count = 0u32;
         let mut glu_count = 0u32;
         let mut ach_count = 0u32;
-        let mut hubs: Vec<(u16, u32)> = Vec::with_capacity(sim.neurons.len());
+        let mut hubs: Vec<(u16, u32)> = Vec::with_capacity(6);
 
         for (i, n) in sim.neurons.iter().enumerate() {
             let rate = n.firing_rate;
@@ -1179,7 +1181,13 @@ impl App {
             }
 
             if let Some(&h) = self.hubness.get(i) {
-                hubs.push((n.id, h));
+                let insert_at = hubs.iter().position(|&(_, hh)| h > hh);
+                if let Some(pos) = insert_at {
+                    hubs.insert(pos, (n.id, h));
+                    if hubs.len() > 5 { hubs.pop(); }
+                } else if hubs.len() < 5 {
+                    hubs.push((n.id, h));
+                }
             }
 
             let is_sensory = n.name.starts_with("AS")
@@ -1215,7 +1223,6 @@ impl App {
                 inter_rate += rate;
             }
         }
-        hubs.sort_by(|a, b| b.1.cmp(&a.1));
         let sensory_avg = sensory_rate / sensory_count.max(1) as f32;
         let motor_avg = motor_rate / motor_count.max(1) as f32;
         let inter_avg = inter_rate / inter_count.max(1) as f32;

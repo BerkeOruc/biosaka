@@ -66,11 +66,11 @@ fn main() -> std::io::Result<()> {
                 simulation.step();
             }
             if app.is_recording {
-                app.record_buffer.push(
+                app.record_buffer.push_back(
                     simulation.neurons.iter().map(|n| if n.firing { 1u8 } else { 0u8 }).collect()
                 );
                 if app.record_buffer.len() > 60000 {
-                    app.record_buffer.remove(0);
+                    app.record_buffer.pop_front();
                 }
             }
             worm.update(&simulation);

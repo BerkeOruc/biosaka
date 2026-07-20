@@ -14,7 +14,6 @@ const FRICTION_ALONG: f32 = 1.5;
 const FRICTION_PERP: f32 = 10.0;
 const MAX_SPEED: f32 = 0.025;
 const BOUNDARY: f32 = 0.025;
-#[allow(dead_code)]
 pub const VULVA_SEGMENT: usize = 10;
 
 pub struct BodySegment {
@@ -289,14 +288,5 @@ impl Worm {
 
     pub fn set_sex(&mut self, sex: &str) {
         self.sex = sex.to_string();
-    }
-
-    #[allow(dead_code)]
-    pub fn has_tail_fan(&self) -> bool {
-        self.sex == "Male"
-    }
-    #[allow(dead_code)]
-    pub fn has_vulva(&self) -> bool {
-        self.sex == "Hermaphrodite"
     }
 }
